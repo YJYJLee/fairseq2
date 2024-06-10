@@ -20,6 +20,7 @@ from fairseq2.generation.generator import (
 from fairseq2.nn.padding import PaddingMask, pad_seqs
 from fairseq2.nn.utils.module import infer_device
 
+import numpy as np
 
 class SequenceToTextConverterBase(ABC):
     """Represents an abstract base class for sequence-to-text converters."""
@@ -88,7 +89,7 @@ class SequenceToTextConverterBase(ABC):
         # (S) -> (N, S)
         target_prefix_seqs = self.target_prefix_seq.expand(batch_size, -1)
 
-        generator_output = self.generator(
+        generator_output, decoding_step = self.generator(
             source_seqs, source_padding_mask, target_prefix_seqs, None
         )
 
@@ -99,10 +100,9 @@ class SequenceToTextConverterBase(ABC):
                 raise RuntimeError(
                     f"The sequence generator returned no hypothesis at index {idx}. Please file a bug report."
                 )
-
             texts.append(self.text_decoder(hypotheses[0].seq))
 
-        return texts, generator_output
+        return texts, generator_output, [str(source_seqs.shape[1]), str(np.average([hypotheses[0].seq.shape[0] for hypotheses in generator_output.hypotheses])), str(decoding_step)]
 
 
 @final

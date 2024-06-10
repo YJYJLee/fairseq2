@@ -6,7 +6,7 @@
 
 from setuptools import find_packages, setup
 
-version = "0.3.0.dev0"
+version = "0.2.1.dev0"
 
 # If this is a local development install, allow nightly fairseq2n builds to
 # take precedence.
@@ -44,15 +44,15 @@ setup(
     python_requires=">=3.8",
     install_requires=[
         "fairseq2n" + fairseq2n_version_spec,
+        "jiwer~=3.0",
         "numpy~=1.23",
         "overrides~=7.3",
         "packaging~=23.1",
         "pyyaml~=6.0",
+        "sacrebleu~=2.3",
+        "torch>=1.12.1",
         "torcheval~=0.0.6",
         "tqdm~=4.62",
         "typing_extensions~=4.3;python_version<'3.10'",
     ],
-    extras_require={
-        "arrow": ["pyarrow>=13.0.0", "pandas~=2.0.0"],
-    },
 )

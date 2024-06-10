@@ -15,22 +15,6 @@ to train custom models for translation, summarization, language modeling, and
 other content generation tasks. It is also the successor of
 [fairseq](https://github.com/facebookresearch/fairseq).
 
-## What is new in v0.2?
-* An implementation of Mistral 7B and Mistral 7B instruct ([arXiv](https://arxiv.org/abs/2310.06825))
-  models with Grouped-Query Attention and Sliding Window Attention. [Check out](./recipes/mistral)
-  the terminal-based interactive demo chat application under recipes.
-* An interactive terminal-based [demo chat application](./recipes/llama) for
-  LLaMA 7B Chat with system prompt support.
-* A new, unified, and efficient [sequence generation API](./src/fairseq2/generation)
-  for both decoder and encoder-decoder models with Beam Search, TopK Sampling,
-  and TopP (a.k.a. Nucleus) Sampling along with toxicity prevention features.
-* Support for PyTorch SDPA/Flash Attention in Relative Position SDPA and Shaw
-  Relative Position SDPA.
-* Lazy [padding mask](./src/fairseq2/nn/padding.py#L18) and [attention mask](./src/fairseq2/nn/transformer/attention_mask.py#L17)
-  initialization for more efficient integration with fused SDPA implementations.
-* A new [sampling operator](./src/fairseq2/data/data_pipeline.py#L115) in our
-  C++-based data pipeline API.
-
 
 ## Getting Started
 You can find our full documentation including tutorials and API reference
@@ -59,9 +43,10 @@ fairseq2 is also used by various external projects such as:
 ## Installing on Linux
 
 ### System Dependencies
-fairseq2 depends on [libsndfile](https://github.com/libsndfile/libsndfile),
-which can be installed via the system package manager on most Linux
-distributions. For Ubuntu-based systems, run:
+fairseq2 has a dependency on
+[libsndfile](https://github.com/libsndfile/libsndfile) that can be installed via
+the system package manager on most Linux distributions. For Ubuntu-based
+systems, run:
 
 ```sh
 sudo apt install libsndfile1
@@ -96,60 +81,21 @@ Besides PyPI, fairseq2 also has pre-built packages available for different
 PyTorch and CUDA versions hosted on FAIR's package repository. The following
 matrix shows the supported combinations.
 
-<table>
-  <thead>
-    <th>fairseq2</th>
-    <th>PyTorch</th>
-    <th>Python</th>
-    <th>Variant*</th>
-    <th>Arch</th>
-  </thead>
-  <tbody>
-    <tr>
-      <td rowspan=2><code>HEAD</code></td>
-      <td><code>2.1.2</code></td>
-      <td><code>&gt;=3.8</code>, <code>&lt;=3.11</code></td>
-      <td><code>cpu</code>, <code>cu118</code>, <code>cu121</code></td>
-      <td><code>x86_64</code></td>
-    </tr>
-    <tr>
-      <td><code>2.0.1</code></td>
-      <td><code>&gt;=3.8</code>, <code>&lt;=3.11</code></td>
-      <td><code>cpu</code>, <code>cu117</code>, <code>cu118</code></td>
-      <td><code>x86_64</code></td>
-    </tr>
-    <tr>
-      <td rowspan=3><code>0.2.0</code></td>
-      <td><code>2.1.1</code></td>
-      <td><code>&gt;=3.8</code>, <code>&lt;=3.11</code></td>
-      <td><code>cpu</code>, <code>cu118</code>, <code>cu121</code></td>
-      <td><code>x86_64</code></td>
-    </tr>
-    <tr>
-      <td><code>2.0.1</code></td>
-      <td><code>&gt;=3.8</code>, <code>&lt;=3.11</code></td>
-      <td><code>cpu</code>, <code>cu117</code>, <code>cu118</code></td>
-      <td><code>x86_64</code></td>
-    </tr>
-    <tr>
-      <td><code>1.13.1</code></td>
-      <td><code>&gt;=3.8</code>, <code>&lt;=3.10</code></td>
-      <td><code>cpu</code>, <code>cu116</code></td>
-      <td><code>x86_64</code></td>
-    </tr>
-  </tbody>
-</table>
+| PyTorch          | Python            | Variant*               | Arch     |
+| ---------------- | ----------------- | ---------------------- | -------- |
+| `2.1.0`, `2.1.1` | `>=3.8`, `<=3.11` | `cpu`, `cu118` `cu121` | `x86_64` |
+| `2.0.0`, `2.0.1` | `>=3.8`, `<=3.11` | `cpu`, `cu117` `cu118` | `x86_64` |
+| `1.13.1`         | `>=3.8`, `<=3.10` | `cpu`, `cu116`         | `x86_64` |
 
 *\* cuXYZ refers to CUDA XY.Z (e.g. cu118 means CUDA 11.8)*
 
 To install a specific combination, first follow the installation instructions on
-[pytorch.org](https://pytorch.org/get-started/locally) for the desired PyTorch
-version, and then use the following command (shown for PyTorch `2.1.2` and
-variant `cu118`):
+[pytorch.org](https://pytorch.org) for the desired PyTorch version, and then use
+the following command (shown for PyTorch `2.1.1` and variant `cu118`):
 
 ```sh
 pip install fairseq2\
-  --extra-index-url https://fair.pkg.atmeta.com/fairseq2/whl/pt2.1.2/cu118
+  --extra-index-url https://fair.pkg.atmeta.com/fairseq2/whl/pt2.1.1/cu118
 ```
 
 
@@ -165,20 +111,21 @@ pip install fairseq2\
 For Linux, we also host nightly builds on FAIR's package repository. The
 supported variants are identical to the ones listed in *Variants* above. Once
 you have installed the desired PyTorch version, you can use the following
-command to install the corresponding nightly package  (shown for PyTorch `2.1.2`
+command to install the corresponding nightly package  (shown for PyTorch `2.1.1`
 and variant `cu118`):
 
 ```sh
 pip install fairseq2\
-  --pre --extra-index-url https://fair.pkg.atmeta.com/fairseq2/whl/nightly/pt2.1.2/cu118
+  --pre --extra-index-url https://fair.pkg.atmeta.com/fairseq2/whl/nightly/pt2.1.1/cu118
 ```
 
 
 ## Installing on macOS
 
 ### System Dependencies
-fairseq2 depends on [libsndfile](https://github.com/libsndfile/libsndfile),
-which can be installed via Homebrew:
+fairseq2 has a dependency on
+[libsndfile](https://github.com/libsndfile/libsndfile) that can be installed via
+Homebrew:
 
 ```sh
 brew install libsndfile

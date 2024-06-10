@@ -15,7 +15,6 @@ from fairseq2.data.data_pipeline import FileMapper as FileMapper
 from fairseq2.data.data_pipeline import FileMapperOutput as FileMapperOutput
 from fairseq2.data.data_pipeline import RecordError as RecordError
 from fairseq2.data.data_pipeline import SequenceData as SequenceData
-from fairseq2.data.data_pipeline import create_bucket_sizes as create_bucket_sizes
 from fairseq2.data.data_pipeline import (
     get_last_failed_example as get_last_failed_example,
 )

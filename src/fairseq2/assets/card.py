@@ -7,8 +7,6 @@
 from __future__ import annotations
 
 import os
-from os import PathLike
-from pathlib import Path
 from typing import (
     AbstractSet,
     Any,
@@ -27,7 +25,7 @@ from urllib.parse import urlparse
 from typing_extensions import Self
 
 from fairseq2.assets.error import AssetError
-from fairseq2.assets.utils import _starts_with_scheme
+from fairseq2.data.typing import is_string_like
 
 T = TypeVar("T")
 
@@ -46,7 +44,7 @@ class AssetCard:
     ) -> None:
         """
         :param metadata:
-            The metadata to be held in the card. Each key-value item should
+            The metadata to be held in the card. Each key-value entry should
             contain a specific piece of information about the asset.
         :param base:
             The card that this card derives from.
@@ -217,12 +215,12 @@ class AssetCardField:
         """
         value = self.as_(list, allow_empty)
 
-        for idx, element in enumerate(value):
+        for element in value:
             if not isinstance(element, kls):
                 pathname = ".".join(self.path)
 
                 raise AssetCardError(
-                    f"The elements of the field '{pathname}' of the asset card '{self.card.name}' must be of type `{kls}`, but the element at index {idx} is of type `{type(element)}` instead."
+                    f"The elements of the field '{pathname}' of the asset card '{self.card.name}' must be of type `{kls}`, but at least one element is of type `{type(element)}` instead."
                 )
 
         return value
@@ -231,18 +229,18 @@ class AssetCardField:
         """Return the value of this field as a :class:`dict` of type ``kls``.
 
         :param kls:
-            The type of the field values.
+            The type of the field elements.
         :param allow_empty:
             If ``True``, allows the dictionary to be empty.
         """
         value = self.as_(dict, allow_empty)
 
-        for key, val in value.items():
-            if not isinstance(val, kls):
+        for element in value.values():
+            if not isinstance(element, kls):
                 pathname = ".".join(self.path)
 
                 raise AssetCardError(
-                    f"The items of the field '{pathname}' of the asset card '{self.card.name}' must be of type `{kls}`, but the item '{key}' is of type `{type(val)}` instead."
+                    f"The elements of the field '{pathname}' of the asset card '{self.card.name}' must be of type `{kls}`, but at least one element is of type `{type(element)}` instead."
                 )
 
         return value
@@ -271,7 +269,6 @@ class AssetCardField:
             pathname = ".".join(self.path)
 
             values = list(valid_values)
-
             values.sort()
 
             raise AssetCardError(
@@ -284,24 +281,31 @@ class AssetCardField:
         """Return the value of this field as a URI."""
         value = self.as_(object)
 
-        if not isinstance(value, (str, PathLike)):
+        if not is_string_like(value) and not isinstance(value, os.PathLike):
             pathname = ".".join(self.path)
 
             raise AssetCardError(
-                f"The value of the field '{pathname}' of the asset card '{self.card.name}' must be of type `{str}` or `{PathLike}`, but is of type `{type(value)}` instead."
+                f"The value of the field '{pathname}' of the asset card '{self.card.name}' must be of type `{str}` or `{os.PathLike}`, but is of type `{type(value)}` instead."
             )
 
+        str_value = str(value)
+
         try:
-            if isinstance(value, PathLike) or not _starts_with_scheme(value):
-                return Path(value).as_uri()
-            else:
-                return urlparse(value).geturl()
-        except ValueError as ex:
+            uri = urlparse(str_value)
+        except ValueError:
+            uri = None
+
+        if uri is None or not (uri.netloc or uri.path):
             pathname = ".".join(self.path)
 
             raise AssetCardError(
-                f"The value of the field '{pathname}' of the asset card '{self.card.name}' must be a URI or an absolute pathname, but is '{value}' instead."
-            ) from ex
+                f"The value of the field '{pathname}' of the asset card '{self.card.name}' must be a URI, but is '{str_value}' instead."
+            )
+
+        if not uri.scheme:
+            uri = uri._replace(scheme="file")
+
+        return uri.geturl()
 
     def as_filename(self) -> str:
         """Return the value of this field as a filename."""

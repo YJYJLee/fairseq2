@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -17,7 +18,6 @@ from fairseq2.assets.metadata_provider import (
     AssetNotFoundError,
     FileAssetMetadataProvider,
 )
-from fairseq2.assets.utils import _get_path_from_env
 from fairseq2.typing import finaloverride
 
 
@@ -153,12 +153,38 @@ def _create_asset_store() -> ProviderBackedAssetStore:
 asset_store = _create_asset_store()
 
 
+def _get_path_from_env(var_name: str) -> Optional[Path]:
+    pathname = os.getenv(var_name)
+    if not pathname:
+        return None
+
+    try:
+        path = Path(pathname)
+    except ValueError as ex:
+        raise RuntimeError(
+            f"`{var_name}` environment variable must contain a valid pathname, but contains '{pathname}' instead."
+        ) from ex
+
+    if not path.exists():
+        logger = logging.getLogger("fairseq2.assets")
+
+        logger.warning(
+            f"The path '{path}' pointed to by the `{var_name}` environment variable does not exist."
+        )
+
+        return None
+
+    return path
+
+
 def _load_asset_directory() -> None:
     asset_dir = _get_path_from_env("FAIRSEQ2_ASSET_DIR")
     if asset_dir is None:
-        asset_dir = Path("/etc/fairseq2/assets").resolve()
+        asset_dir = Path("/etc/fairseq2/assets")
         if not asset_dir.exists():
             return
+
+    asset_dir = asset_dir.expanduser().resolve()
 
     asset_store.metadata_providers.append(FileAssetMetadataProvider(asset_dir))
 
@@ -171,11 +197,13 @@ def _load_user_asset_directory() -> None:
     if asset_dir is None:
         asset_dir = _get_path_from_env("XDG_CONFIG_HOME")
         if asset_dir is None:
-            asset_dir = Path("~/.config").expanduser()
+            asset_dir = Path("~/.config")
 
-        asset_dir = asset_dir.joinpath("fairseq2/assets").resolve()
+        asset_dir = asset_dir.expanduser().resolve().joinpath("fairseq2/assets")
         if not asset_dir.exists():
             return
+    else:
+        asset_dir = asset_dir.expanduser().resolve()
 
     asset_store.user_metadata_providers.append(FileAssetMetadataProvider(asset_dir))
 

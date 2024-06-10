@@ -9,8 +9,7 @@ from abc import ABC, abstractmethod
 from copy import deepcopy
 from functools import partial
 from pathlib import Path
-from pickle import PickleError
-from typing import Any, Dict, Generic, Optional, Protocol, TypeVar, Union, final
+from typing import Any, Generic, Mapping, Optional, Protocol, TypeVar, Union, final
 
 from torch.nn import Module
 
@@ -26,12 +25,8 @@ from fairseq2.data import PathLike
 from fairseq2.data.text import TextTokenizer
 from fairseq2.models.utils.arch_registry import ArchitectureRegistry
 from fairseq2.models.utils.checkpoint import load_checkpoint
-from fairseq2.nn.utils.module import (
-    infer_device,
-    reset_non_persistent_buffers,
-    to_empty,
-)
-from fairseq2.typing import CPU, META, DataType, Device, finaloverride
+from fairseq2.nn.utils.module import infer_device, reset_non_persistent_buffers
+from fairseq2.typing import DataType, Device, finaloverride
 from fairseq2.utils.dataclass import update_dataclass
 
 logger = logging.getLogger("fairseq2.models")
@@ -134,8 +129,8 @@ class CheckpointConverter(Protocol[ConfigT_contra]):
     """Converts checkpoints to fairseq2."""
 
     def __call__(
-        self, checkpoint: Dict[str, Any], config: ConfigT_contra
-    ) -> Dict[str, Any]:
+        self, checkpoint: Mapping[str, Any], config: ConfigT_contra
+    ) -> Mapping[str, Any]:
         """
         :param checkpoint:
             The checkpoint to convert.
@@ -197,7 +192,6 @@ class ModelLoader(Generic[ModelT, ConfigT]):
         dtype: Optional[DataType] = None,
         out: Optional[ModelT] = None,
         force: bool = False,
-        cache_only: bool = False,
         progress: bool = True,
     ) -> ModelT:
         """
@@ -210,10 +204,7 @@ class ModelLoader(Generic[ModelT, ConfigT]):
         :param out:
             The output model to load.
         :param force:
-            If ``True``, downloads the model checkpoint even if it is already in
-            cache.
-        :param cache_only:
-            If ``True``, skips the download and uses the cached model checkpoint.
+            If ``True``, downloads the checkpoint even if it is already in cache.
         :param progress:
             If ``True``, displays a progress bar to stderr.
 
@@ -232,7 +223,7 @@ class ModelLoader(Generic[ModelT, ConfigT]):
 
         try:
             path = self.download_manager.download_checkpoint(
-                uri, card.name, force=force, cache_only=cache_only, progress=progress
+                uri, card.name, force=force, progress=progress
             )
         except ValueError as ex:
             raise AssetCardError(
@@ -247,34 +238,40 @@ class ModelLoader(Generic[ModelT, ConfigT]):
         try:
             checkpoint = load_checkpoint(
                 path,
-                map_location=CPU,
+                map_location="cpu",
                 restrict=self.restrict_checkpoints,
                 converter=checkpoint_converter,
             )
-        except (RuntimeError, OSError, KeyError, ValueError, PickleError) as ex:
+        except (IOError, KeyError, ValueError) as ex:
             raise AssetError(
                 f"The checkpoint of {card.name} cannot be loaded. See nested exception for details."
             ) from ex
 
         if out is not None:
             model = out
+
+            is_meta = infer_device(model).type == "meta"
         else:
             try:
                 # Try to construct the model on the meta device.
-                model = self.model_factory(config, device=META, dtype=dtype)
+                model = self.model_factory(config, device=Device("meta"), dtype=dtype)
+
+                is_meta = True
             except NotImplementedError:
-                logger.warning("One or more operators in %s constructor do not support the meta device. Skipping lazy initialization.", card.name)  # fmt: skip
+                is_meta = False
+
+                logger.warning(
+                    f"One or more operators in {card.name} constructor do not support meta device. Skipping lazy initialization."
+                )
 
                 # If we are here, it means the model has at least one operator that
                 # does not support meta device. Do regular model initialization.
                 model = self.model_factory(config, device=device, dtype=dtype)
 
-        model_device = infer_device(model)
-
-        if model_device == META:
+        if is_meta:
             # Move the model to the actual device without initializing. Its
             # state will be overwritten by the checkpoint anyways.
-            to_empty(model, device=device or CPU)
+            model = model.to_empty(device=device or "cpu")
 
         # Load the model.
         try:
@@ -288,10 +285,10 @@ class ModelLoader(Generic[ModelT, ConfigT]):
             model.load_state_dict(state_dict)
         except (KeyError, ValueError) as ex:
             raise AssetError(
-                f"{card.name} cannot be loaded. See nested exception for details."
+                f"The checkpoint of {card.name} cannot be loaded. See nested exception for details."
             ) from ex
 
-        if model_device == META:
+        if is_meta:
             # Non-persistent buffers are not included in the checkpoint, so we
             # have to explicitly initialize them.
             reset_non_persistent_buffers(model)
@@ -326,7 +323,6 @@ class TokenizerLoaderBase(ABC, Generic[TokenizerT]):
         model_name_or_card: Union[str, AssetCard],
         *,
         force: bool = False,
-        cache_only: bool = False,
         progress: bool = True,
     ) -> TokenizerT:
         """
@@ -334,8 +330,6 @@ class TokenizerLoaderBase(ABC, Generic[TokenizerT]):
             The name or asset card of the model whose tokenizer to load.
         :param force:
             If ``True``, downloads the tokenizer even if it is already in cache.
-        :param cache_only:
-            If ``True``, skips the download and uses the cached tokenizer.
         :param progress:
             If ``True``, displays a progress bar to stderr.
         """
@@ -348,7 +342,7 @@ class TokenizerLoaderBase(ABC, Generic[TokenizerT]):
 
         try:
             path = self.download_manager.download_tokenizer(
-                uri, card.name, force=force, cache_only=cache_only, progress=progress
+                uri, card.name, force=force, progress=progress
             )
         except ValueError as ex:
             raise AssetCardError(

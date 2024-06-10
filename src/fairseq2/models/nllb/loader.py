@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from pathlib import Path
-from typing import Any, Dict, final
+from typing import Any, Mapping, final
 
 import torch
 
@@ -19,8 +19,8 @@ from fairseq2.typing import finaloverride
 
 
 def convert_nllb_checkpoint(
-    checkpoint: Dict[str, Any], config: NllbConfig
-) -> Dict[str, Any]:
+    checkpoint: Mapping[str, Any], config: NllbConfig
+) -> Mapping[str, Any]:
     """Convert a fairseq NLLB checkpoint to fairseq2."""
     state_dict = checkpoint["model"]
 
@@ -32,8 +32,6 @@ def convert_nllb_checkpoint(
         # fmt: off
         r"^encoder\.embed_tokens\.":                              r"encoder_frontend.embed.",
         r"^decoder\.embed_tokens\.":                              r"decoder_frontend.embed.",
-        r"^encoder\.layernorm_embedding\.":                       r"encoder_frontend.layer_norm.",
-        r"^decoder\.layernorm_embedding\.":                       r"decoder_frontend.layer_norm.",
         r"^decoder\.layers\.([0-9]+)\.self_attn\.out_proj\.":     r"decoder.layers.\1.self_attn.output_proj.",
         r"^encoder\.layers\.([0-9]+)\.self_attn\.out_proj\.":     r"encoder.layers.\1.self_attn.output_proj.",
         r"^decoder\.layers\.([0-9]+)\.encoder_attn\.out_proj\.":  r"decoder.layers.\1.encoder_decoder_attn.output_proj.",

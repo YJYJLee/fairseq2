@@ -14,11 +14,11 @@ fairseq2n is not available as a pre-built package for your system, please follow
 the installation instructions [here](INSTALL_FROM_SOURCE.md).
 
 For an editable installation, first, install a nightly build of fairseq2n (shown
-for PyTorch `2.1.2` and variant `cu118`):
+for PyTorch `2.1.1` and variant `cu118`):
 
 ```sh
 pip install fairseq2n\
-  --pre --upgrade --extra-index-url https://fair.pkg.atmeta.com/fairseq2/whl/nightly/pt2.1.2/cu118
+  --pre --upgrade --extra-index-url https://fair.pkg.atmeta.com/fairseq2/whl/nightly/pt2.1.1/cu118
 ```
 
 > [!WARNING]
@@ -55,7 +55,7 @@ pip install -r requirements-devel.txt
 > the fairseq2n installation command above to get the most up-to-date binary. If
 > you observe runtime or test failures after the installation, it might be
 > because the latest nightlies are not published yet. If the problem persists
-> for more than 12 hours, please create a
+> after about 12 hours, please create a
 > [GitHub issue](https://github.com/facebookresearch/fairseq2/issues/new/choose).
 
 ## Testing Your Work
@@ -81,7 +81,7 @@ If you have changes in C++ or CUDA, in addition to `pytest`, also run the native
 tests:
 
 ```sh
-native/build/tests/run-tests
+fairseq2n/build/tests/run-tests
 ```
 
 
@@ -125,7 +125,7 @@ If you have touched C++ or CUDA files, lint your code with an up-to-date version
 of the clang toolkit and address any issues reported:
 
 ```sh
-cd native
+cd fairseq2n
 
 CC=clang CXX=clang++ cmake -GNinja -DFAIRSEQ2N_RUN_CLANG_TIDY=ON -B build
 
@@ -135,7 +135,7 @@ cmake --build build
 Alternatively:
 
 ```sh
-cd native
+cd fairseq2n
 
 CC=clang CXX=clang++ cmake -GNinja -B build
 

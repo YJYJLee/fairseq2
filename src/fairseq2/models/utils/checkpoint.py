@@ -14,7 +14,6 @@ from typing_extensions import TypeAlias
 
 from fairseq2.data.typing import PathLike
 from fairseq2.typing import Device
-from fairseq2.utils.version import _is_pt21_or_greater
 
 MapLocation: TypeAlias = Optional[
     Union[Callable[[Tensor, str], Tensor], Device, str, Dict[str, str]]
@@ -24,7 +23,7 @@ MapLocation: TypeAlias = Optional[
 class CheckpointConverter(Protocol):
     """Converts checkpoints to fairseq2."""
 
-    def __call__(self, checkpoint: Dict[str, Any]) -> Dict[str, Any]:
+    def __call__(self, checkpoint: Mapping[str, Any]) -> Mapping[str, Any]:
         """
         :param checkpoint:
             The checkpoint to convert.
@@ -40,7 +39,7 @@ def load_checkpoint(
     map_location: MapLocation = None,
     restrict: bool = False,
     converter: Optional[CheckpointConverter] = None,
-) -> Dict[str, Any]:
+) -> Mapping[str, Any]:
     """Load the checkpoint stored in ``pathname``.
 
     :param pathname:
@@ -61,13 +60,8 @@ def load_checkpoint(
         # Suppress the noisy deprecated `TypedStorage` warning.
         warnings.simplefilter("ignore")
 
-        kwargs = {}
-
-        if _is_pt21_or_greater():
-            kwargs["mmap"] = True
-
-        checkpoint: Dict[str, Any] = torch.load(
-            str(pathname), map_location, weights_only=restrict, **kwargs
+        checkpoint: Mapping[str, Any] = torch.load(
+            str(pathname), map_location, weights_only=restrict
         )
 
     if converter is not None:
@@ -77,7 +71,7 @@ def load_checkpoint(
 
 
 def convert_model_state_dict(
-    state_dict: Dict[str, Any], key_map: Mapping[str, str]
+    state_dict: Mapping[str, Any], key_map: Mapping[str, str]
 ) -> Dict[str, Any]:
     """Convert a model state dictionary to fairseq2.
 
@@ -108,7 +102,7 @@ def convert_model_state_dict(
 
 
 def convert_fairseq_checkpoint(
-    checkpoint: Dict[str, Any], key_map: Mapping[str, str]
+    checkpoint: Mapping[str, Any], key_map: Mapping[str, str]
 ) -> Dict[str, Any]:
     """Convert a fairseq checkpoint to fairseq2.
 

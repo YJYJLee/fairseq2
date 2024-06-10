@@ -408,9 +408,7 @@ class StandardMultiheadAttention(MultiheadAttention):
                 if state is None:
                     state_factory = self.state_factory or FullAttentionState
 
-                    state = state_factory(
-                        k, v, state_bag.max_num_steps, state_bag.capacity_increment
-                    )
+                    state = state_factory(k, v, state_bag.max_num_steps)
 
                     state_bag.set_state(self, state)
                 else:
@@ -428,9 +426,7 @@ class StandardMultiheadAttention(MultiheadAttention):
 
                     state_factory = self.state_factory or StaticAttentionState
 
-                    state = state_factory(
-                        k, v, max_seq_len=k.size(2), capacity_increment=None
-                    )
+                    state = state_factory(k, v, max_seq_len=k.size(2))
 
                     state_bag.set_state(self, state)
                 else:
@@ -586,9 +582,7 @@ class AttentionState(IncrementalState):
 class AttentionStateFactory(Protocol):
     """Constructs instances of :class:`AttentionState`."""
 
-    def __call__(
-        self, k: Tensor, v: Tensor, max_seq_len: int, capacity_increment: Optional[int]
-    ) -> AttentionState:
+    def __call__(self, k: Tensor, v: Tensor, max_seq_len: int) -> AttentionState:
         """
         :param k:
             The initial projected keys.
@@ -596,10 +590,6 @@ class AttentionStateFactory(Protocol):
             The initial projected values.
         :param max_seq_len:
             The expected maximum sequence length.
-        :param capacity_increment:
-            The sequence length capacity of state tensors will be incremented by
-            multiples of this value. If ``None``, state tensors will be
-            preallocated with a capacity of ``max_seq_len``.
         """
 
 
@@ -613,40 +603,21 @@ class FullAttentionState(AttentionState):
 
     k: Tensor
     """The projected keys accumulated from the past decoding steps. *Shape:*
-    :math:`(N,H,S_{rsv},K_{proj})`, where :math:`N` is the batch size, :math:`H`
-    is the number of heads, :math:`S_{rsv}` is the reserved sequence length
+    :math:`(N,H,S_{res},K_{proj})`, where :math:`N` is the batch size, :math:`H`
+    is the number of heads, :math:`S_{res}` is the reserved sequence length
     capacity, and :math:`K_{proj}` is the projected key size."""
 
     v: Tensor
     """The projected values accumulated from the past decoding steps. *Shape:*
-    :math:`(N,H,S_{rsv},V_{proj})`, where :math:`N` is the batch size, :math:`H`
-    is the number of heads, :math:`S_{rsv}` is the reserved sequence length
+    :math:`(N,H,S_{res},V_{proj})`, where :math:`N` is the batch size, :math:`H`
+    is the number of heads, :math:`S_{res}` is the reserved sequence length
     capacity, and :math:`V_{proj}` is the projected value size."""
 
-    capacity_increment: Optional[int]
-    """The sequence length capacity of :attr:`k` and :attr:`v` is incremented by
-    multiples of this value."""
-
-    def __init__(
-        self, k: Tensor, v: Tensor, max_seq_len: int, capacity_increment: Optional[int]
-    ) -> None:
-        if capacity_increment is not None and capacity_increment < 1:
-            raise ValueError(
-                f"`capacity_increment` must be greater than or equal to 1, but is {capacity_increment} instead."
-            )
-
+    def __init__(self, k: Tensor, v: Tensor, max_seq_len: int) -> None:
         batch_size, num_heads, seq_len, head_dim = k.shape
 
-        init_capacity = 0 if capacity_increment else max_seq_len
-
-        self.k = k.new_empty((batch_size, num_heads, init_capacity, head_dim))
-        self.v = v.new_empty((batch_size, num_heads, init_capacity, head_dim))
-
-        self.seq_len = 0
-
-        self.capacity_increment = capacity_increment
-
-        self._expand_kv(seq_len)
+        self.k = k.new_empty((batch_size, num_heads, max_seq_len, head_dim))
+        self.v = v.new_empty((batch_size, num_heads, max_seq_len, head_dim))
 
         self.k[:, :, :seq_len] = k
         self.v[:, :, :seq_len] = v
@@ -655,41 +626,12 @@ class FullAttentionState(AttentionState):
 
     @finaloverride
     def append(self, k: Tensor, v: Tensor) -> None:
-        input_seq_len = k.size(2)
-
-        self._expand_kv(input_seq_len)
-
         pos = self.seq_len
 
-        self.k[:, :, pos : pos + input_seq_len] = k
-        self.v[:, :, pos : pos + input_seq_len] = v
+        self.k[:, :, pos : pos + 1] = k
+        self.v[:, :, pos : pos + 1] = v
 
-        self.seq_len += input_seq_len
-
-    def _expand_kv(self, input_seq_len: int) -> None:
-        if self.capacity_increment is None:
-            return
-
-        batch_size, num_heads, capacity, head_dim = self.k.shape
-
-        new_seq_len = self.seq_len + input_seq_len
-
-        if new_seq_len <= capacity:
-            return
-
-        inc = self.capacity_increment
-
-        capacity = ((new_seq_len + inc - 1) // inc) * inc
-
-        k = self.k.new_empty((batch_size, num_heads, capacity, head_dim))
-        v = self.v.new_empty((batch_size, num_heads, capacity, head_dim))
-
-        if self.seq_len > 0:
-            k[:, :, : self.seq_len] = self.k[:, :, : self.seq_len]
-            v[:, :, : self.seq_len] = self.v[:, :, : self.seq_len]
-
-        self.k = k
-        self.v = v
+        self.seq_len += 1
 
     @finaloverride
     def get(self) -> Tuple[Tensor, Tensor]:
@@ -721,107 +663,49 @@ class LocalAttentionState(AttentionState):
 
     k: Tensor
     """The projected keys accumulated from the past :attr:`attn_window_len`
-    decoding steps. *Shape:* :math:`(N,H,S_{rsv},K_{proj})`, where :math:`N` is
-    the batch size, :math:`H` is the number of heads, :math:`S_{rsv}` is the
-    reserved sequence length capacity, and :math:`K_{proj}` is the projected key
-    size."""
+    decoding steps. *Shape:* :math:`(N,H,S_{wnd},K_{proj})`, where :math:`N` is
+    the batch size, :math:`H` is the number of heads, :math:`S_{wnd}` is the
+    attention window length (i.e. :attr:`attn_window_len`), and :math:`K_{proj}`
+    is the projected key size."""
 
     v: Tensor
     """The projected values accumulated from the past :attr:`attn_window_len`
-    decoding steps. *Shape:* :math:`(N,H,S_{rsv},V_{proj})`, where :math:`N` is
-    the batch size, :math:`H` is the number of heads, :math:`S_{rsv}` is the
-    reserved sequence length capacity, and :math:`V_{proj}` is the projected
-    value size."""
-
-    capacity_increment: Optional[int]
-    """The sequence length capacity of :attr:`k` and :attr:`v` is incremented by
-    multiples of this value."""
+    decoding steps. *Shape:* :math:`(N,H,S_{wnd},V_{proj})`, where :math:`N` is
+    the batch size, :math:`H` is the number of heads, :math:`S_{wnd}` is the
+    attention window length (i.e. :attr:`attn_window_len`), and :math:`V_{proj}`
+    is the projected value size."""
 
     def __init__(
-        self,
-        k: Tensor,
-        v: Tensor,
-        max_seq_len: int,
-        attn_window_len: int,
-        capacity_increment: Optional[int],
+        self, k: Tensor, v: Tensor, max_seq_len: int, attn_window_len: int
     ) -> None:
-        if capacity_increment is not None and capacity_increment < 1:
-            raise ValueError(
-                f"`capacity_increment` must be greater than or equal to 1, but is {capacity_increment} instead."
-            )
+        batch_size, num_heads, seq_len, head_dim = k.shape
 
         self.attn_window_len = min(max_seq_len, attn_window_len)
 
-        batch_size, num_heads, seq_len, head_dim = k.shape
+        self.k = k.new_empty((batch_size, num_heads, self.attn_window_len, head_dim))
+        self.v = v.new_empty((batch_size, num_heads, self.attn_window_len, head_dim))
 
-        init_capacity = 0 if capacity_increment else self.attn_window_len
+        pos = min(seq_len, self.attn_window_len)
 
-        self.k = k.new_empty((batch_size, num_heads, init_capacity, head_dim))
-        self.v = v.new_empty((batch_size, num_heads, init_capacity, head_dim))
-
-        self.seq_len = 0
-
-        self.capacity_increment = capacity_increment
-
-        self._expand_kv(seq_len)
-
-        copy_len = min(seq_len, self.attn_window_len)
-
-        self.k[:, :, :copy_len] = k[:, :, -copy_len:]
-        self.v[:, :, :copy_len] = v[:, :, -copy_len:]
+        self.k[:, :, :pos] = k[:, :, -pos:]
+        self.v[:, :, :pos] = v[:, :, -pos:]
 
         self.seq_len = seq_len
 
     @finaloverride
     def append(self, k: Tensor, v: Tensor) -> None:
-        input_seq_len = k.size(2)
+        if self.seq_len >= self.attn_window_len:
+            self.k = torch.roll(self.k, shifts=-1, dims=2)
+            self.v = torch.roll(self.v, shifts=-1, dims=2)
 
-        self._expand_kv(input_seq_len)
-
-        if self.seq_len + input_seq_len > self.attn_window_len:
-            copy_len = min(input_seq_len, self.attn_window_len)
-
-            if copy_len == self.attn_window_len:
-                pos = 0
-            else:
-                self.k = torch.roll(self.k, shifts=-copy_len, dims=2)
-                self.v = torch.roll(self.v, shifts=-copy_len, dims=2)
-
-                pos = self.attn_window_len - copy_len
+            pos = self.attn_window_len - 1
         else:
             pos = self.seq_len
 
-            copy_len = input_seq_len
+        self.k[:, :, pos : pos + 1] = k
+        self.v[:, :, pos : pos + 1] = v
 
-        self.k[:, :, pos : pos + copy_len] = k[:, :, -copy_len:]
-        self.v[:, :, pos : pos + copy_len] = v[:, :, -copy_len:]
-
-        self.seq_len += input_seq_len
-
-    def _expand_kv(self, input_seq_len: int) -> None:
-        if self.capacity_increment is None:
-            return
-
-        batch_size, num_heads, capacity, head_dim = self.k.shape
-
-        new_seq_len = self.seq_len + input_seq_len
-
-        if new_seq_len <= capacity or capacity == self.attn_window_len:
-            return
-
-        inc = self.capacity_increment
-
-        capacity = min(((new_seq_len + inc - 1) // inc) * inc, self.attn_window_len)
-
-        k = self.k.new_empty((batch_size, num_heads, capacity, head_dim))
-        v = self.v.new_empty((batch_size, num_heads, capacity, head_dim))
-
-        if self.seq_len > 0:
-            k[:, :, : self.seq_len] = self.k[:, :, : self.seq_len]
-            v[:, :, : self.seq_len] = self.v[:, :, : self.seq_len]
-
-        self.k = k
-        self.v = v
+        self.seq_len += 1
 
     @finaloverride
     def get(self) -> Tuple[Tensor, Tensor]:
@@ -846,16 +730,8 @@ class LocalAttentionStateFactory:
         """
         self.attn_window_len = attn_window_len
 
-    def __call__(
-        self,
-        k: Tensor,
-        v: Tensor,
-        max_seq_len: int,
-        capacity_increment: Optional[int],
-    ) -> LocalAttentionState:
-        return LocalAttentionState(
-            k, v, max_seq_len, self.attn_window_len, capacity_increment
-        )
+    def __call__(self, k: Tensor, v: Tensor, max_seq_len: int) -> LocalAttentionState:
+        return LocalAttentionState(k, v, max_seq_len, self.attn_window_len)
 
     def __repr__(self) -> str:
         return f"LocalAttentionStateFactory(attn_window_len={self.attn_window_len})"
@@ -869,15 +745,13 @@ class StaticAttentionState(AttentionState):
     k: Tensor
     v: Tensor
 
-    def __init__(
-        self, k: Tensor, v: Tensor, max_seq_len: int, capacity_increment: Optional[int]
-    ) -> None:
+    def __init__(self, k: Tensor, v: Tensor, max_seq_len: int) -> None:
         self.k = k
         self.v = v
 
     @finaloverride
     def append(self, k: Tensor, v: Tensor) -> None:
-        raise ValueError(" `StaticAttentionState` does not support `append()`.")
+        raise ValueError("`append()` on `StaticAttentionState` is not supported.")
 
     @finaloverride
     def get(self) -> Tuple[Tensor, Tensor]:
@@ -885,6 +759,5 @@ class StaticAttentionState(AttentionState):
 
     @finaloverride
     def reorder(self, new_order: Tensor) -> None:
-        if new_order.size(0) != self.k.size(0):
-            self.k = self.k.index_select(0, new_order)
-            self.v = self.v.index_select(0, new_order)
+        self.k = self.k.index_select(0, new_order)
+        self.v = self.v.index_select(0, new_order)

@@ -77,7 +77,7 @@ def test_load_s2t_conformer_rel_pos_covost_st_en_de() -> None:
 def assert_translation(
     model: TransformerModel, tokenizer: S2TTransformerTokenizer, expected: str
 ) -> None:
-    fbank = torch.load(TEST_FBANK_PATH).to(device)
+    fbanks = torch.load(TEST_FBANK_PATH).to(device)
 
     generator = BeamSearchSeq2SeqGenerator(model)
 
@@ -85,6 +85,6 @@ def assert_translation(
         generator, tokenizer, task="translation", target_lang="de"
     )
 
-    text, _ = converter(fbank)
+    texts, _ = converter(fbanks)
 
-    assert text == expected
+    assert texts == expected

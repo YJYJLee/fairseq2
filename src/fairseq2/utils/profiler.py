@@ -4,23 +4,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from __future__ import annotations
+from typing import Optional
 
-from time import perf_counter
-from typing import Any, Optional
-
-import torch
 from torch.profiler import (
     ProfilerActivity,
     profile,
     schedule,
     tensorboard_trace_handler,
 )
-from typing_extensions import Self
 
 from fairseq2.data.typing import PathLike
 from fairseq2.gang import Gang
-from fairseq2.typing import Device
 
 
 class Profiler:
@@ -86,76 +80,19 @@ class Profiler:
             self._profile.stop()
 
     def step(self) -> None:
-        """Move to the next profiling step."""
+        """Signal the profiler that the next profiling step has started."""
         if self._profile is not None:
             self._profile.step()
 
-    def __enter__(self) -> Self:
+    def __enter__(self) -> "Profiler":
         self.start()
 
         return self
 
-    def __exit__(self, *exc: Any) -> None:
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:  # type: ignore[no-untyped-def]
         self.stop()
 
     @property
     def wrapped_profile(self) -> Optional[profile]:
         """The wrapped :class:`profile` instance."""
         return self._profile
-
-
-class Stopwatch:
-    """Measures elapsed execution time."""
-
-    start_time: Optional[float]
-    elapsed_time: float
-    device: Optional[Device]
-
-    def __init__(self, device: Optional[Device] = None) -> None:
-        """
-        :param device:
-            If specified, waits for all operations on ``device`` to complete
-            before measuring the elapsed time. Note that this can have a
-            negative impact on the runtime performance if not used carefully.
-        """
-        self.start_time = None
-        self.elapsed_time = 0.0
-        self.device = device
-
-    def start(self) -> None:
-        """Start the stopwatch."""
-        if self.start_time is not None:
-            raise RuntimeError("The stopwatch is already running.")
-
-        if self.device is not None and self.device.type == "cuda":
-            torch.cuda.synchronize(self.device)
-
-        self.start_time = perf_counter()
-
-        self.elapsed_time = 0.0
-
-    def stop(self) -> None:
-        """Stop the stopwatch."""
-        if self.start_time is None:
-            raise RuntimeError("The stopwatch is not running.")
-
-        if self.device is not None and self.device.type == "cuda":
-            torch.cuda.synchronize(self.device)
-
-        self.elapsed_time = perf_counter() - self.start_time
-
-        # Reset.
-        self.start_time = None
-
-    def __enter__(self) -> Self:
-        self.start()
-
-        return self
-
-    def __exit__(self, *exc: Any) -> None:
-        self.stop()
-
-    @property
-    def is_running(self) -> bool:
-        """Return ``True`` if the stopwatch is running."""
-        return self.start_time is not None

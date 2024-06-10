@@ -47,8 +47,6 @@ class SamplingSequenceGenerator(SequenceGenerator):
     temperature: float
     unk_penalty: float
     len_penalty: float
-    prefill_chunk_size: Optional[int]
-    decode_capacity_increment: Optional[int]
     step_processors: List[StepProcessor]
 
     def __init__(
@@ -66,8 +64,6 @@ class SamplingSequenceGenerator(SequenceGenerator):
         temperature: float = 0.6,
         unk_penalty: float = 0.0,
         len_penalty: float = 1.0,
-        prefill_chunk_size: Optional[int] = 512,
-        decode_capacity_increment: Optional[int] = 16,
         step_processors: Optional[Sequence[StepProcessor]] = None,
     ) -> None:
         """
@@ -98,13 +94,6 @@ class SamplingSequenceGenerator(SequenceGenerator):
         :param len_penalty:
             The length penalty, where values less than 1.0 favor shorter
             sequences; values greater than 1.0 favor longer sequences.
-        :param prefill_chunk_size:
-            The prefill will be performed incrementally by chunks of this size.
-            If ``None``, the entire prefill will be performed at once.
-        :param decode_capacity_increment:
-            The sequence length capacity of state tensors will be incremented by
-            multiples of this value. If ``None``, state tensors will be
-            preallocated with a capacity of ``max_seq_len``.
         :param step_processors:
             The processors to call at each generation step.
         """
@@ -125,16 +114,6 @@ class SamplingSequenceGenerator(SequenceGenerator):
                 f"`min_gen_len` must be less than or equal to `max_gen_len` ({max_gen_len}), but is {min_gen_len} instead."
             )
 
-        if prefill_chunk_size is not None and prefill_chunk_size < 1:
-            raise ValueError(
-                f"`prefill_chunk_size` must be greater than or equal to 1, but is {prefill_chunk_size} instead."
-            )
-
-        if decode_capacity_increment is not None and decode_capacity_increment < 1:
-            raise ValueError(
-                f"`decode_capacity_increment` must be greater than or equal to 1, but is {decode_capacity_increment} instead."
-            )
-
         self.sampler = sampler
         self.num_gens = num_gens
         self.min_gen_len = min_gen_len
@@ -146,8 +125,6 @@ class SamplingSequenceGenerator(SequenceGenerator):
         self.temperature = temperature
         self.unk_penalty = unk_penalty
         self.len_penalty = len_penalty
-        self.prefill_chunk_size = prefill_chunk_size
-        self.decode_capacity_increment = decode_capacity_increment
 
         if step_processors:
             self.step_processors = list(step_processors)
@@ -174,8 +151,6 @@ class SamplingSequenceGenerator(SequenceGenerator):
             self.temperature,
             self.unk_penalty,
             self.len_penalty,
-            self.prefill_chunk_size,
-            self.decode_capacity_increment,
             self.step_processors,
             self._step_hooks,
         )
@@ -200,8 +175,6 @@ class SamplingSeq2SeqGenerator(Seq2SeqGenerator):
     temperature: float
     unk_penalty: float
     len_penalty: float
-    prefill_chunk_size: Optional[int]
-    decode_capacity_increment: Optional[int]
     step_processors: List[StepProcessor]
 
     def __init__(
@@ -219,8 +192,6 @@ class SamplingSeq2SeqGenerator(Seq2SeqGenerator):
         temperature: float = 0.6,
         unk_penalty: float = 0.0,
         len_penalty: float = 1.0,
-        prefill_chunk_size: Optional[int] = 512,
-        decode_capacity_increment: Optional[int] = 16,
         step_processors: Optional[Sequence[StepProcessor]] = None,
     ) -> None:
         """
@@ -252,13 +223,6 @@ class SamplingSeq2SeqGenerator(Seq2SeqGenerator):
         :param len_penalty:
             The length penalty, where values less than 1.0 favor shorter
             sequences; values greater than 1.0 favor longer sequences.
-        :param prefill_chunk_size:
-            The prefill will be performed incrementally by chunks of this size.
-            If ``None``, the entire prefill will be performed at once.
-        :param decode_capacity_increment:
-            The sequence length capacity of state tensors will be incremented by
-            multiples of this value. If ``None``, state tensors will be
-            preallocated with a capacity of ``max_seq_len``.
         :param step_processors:
             The processors to call at each generation step.
         """
@@ -267,16 +231,6 @@ class SamplingSeq2SeqGenerator(Seq2SeqGenerator):
         if min_gen_len < 1:
             raise ValueError(
                 f"`min_gen_len` must be greater than or equal to 1, but is {min_gen_len} instead."
-            )
-
-        if prefill_chunk_size is not None and prefill_chunk_size < 1:
-            raise ValueError(
-                f"`prefill_chunk_size` must be greater than or equal to 1, but is {prefill_chunk_size} instead."
-            )
-
-        if decode_capacity_increment is not None and decode_capacity_increment < 1:
-            raise ValueError(
-                f"`decode_capacity_increment` must be greater than or equal to 1, but is {decode_capacity_increment} instead."
             )
 
         self.sampler = sampler
@@ -290,8 +244,6 @@ class SamplingSeq2SeqGenerator(Seq2SeqGenerator):
         self.temperature = temperature
         self.unk_penalty = unk_penalty
         self.len_penalty = len_penalty
-        self.prefill_chunk_size = prefill_chunk_size
-        self.decode_capacity_increment = decode_capacity_increment
 
         if step_processors:
             self.step_processors = list(step_processors)
@@ -350,8 +302,6 @@ class SamplingSeq2SeqGenerator(Seq2SeqGenerator):
             self.temperature,
             self.unk_penalty,
             self.len_penalty,
-            self.prefill_chunk_size,
-            self.decode_capacity_increment,
             self.step_processors,
             self._step_hooks,
         )
@@ -471,8 +421,7 @@ class _SamplingSequenceGeneratorOpBase(ABC):
     temperature: float
     unk_penalty: float
     len_penalty: float
-    prefill_chunk_size: Optional[int]
-    step_processors: List[StepProcessor]
+    step_processors: Sequence[StepProcessor]
     step_nr: int
     state_bag: IncrementalStateBag
     prompt_lens: Optional[Tensor]
@@ -499,9 +448,7 @@ class _SamplingSequenceGeneratorOpBase(ABC):
         temperature: float,
         unk_penalty: float,
         len_penalty: float,
-        prefill_chunk_size: Optional[int],
-        decode_capacity_increment: Optional[int],
-        step_processors: List[StepProcessor],
+        step_processors: Sequence[StepProcessor],
         step_hooks: Dict[int, StepHook],
     ) -> None:
         self.sampler = sampler
@@ -549,15 +496,12 @@ class _SamplingSequenceGeneratorOpBase(ABC):
         self.temperature = temperature
         self.unk_penalty = unk_penalty
         self.len_penalty = len_penalty
-        self.prefill_chunk_size = prefill_chunk_size
         self.step_processors = step_processors
         self.step_hooks = step_hooks
 
         self.step_nr = 0
 
-        self.state_bag = IncrementalStateBag(
-            self.max_seq_len, capacity_increment=decode_capacity_increment
-        )
+        self.state_bag = IncrementalStateBag(self.max_seq_len)
 
         if prompt_padding_mask is None:
             self.prompt_lens = None
@@ -630,23 +574,13 @@ class _SamplingSequenceGeneratorOpBase(ABC):
             self._reorder_state(fan_out)
 
     def _prefill(self) -> None:
-        chunk_begin = 0
-
         prefill_len = self.min_prompt_len
 
-        while chunk_begin < prefill_len - 1:
-            chunk_size = prefill_len - chunk_begin - 1
+        model_output = self._decode(self.seqs[:, : prefill_len - 1])
 
-            # Decode by chunks of `prefill_chunk_size`.
-            if self.prefill_chunk_size and chunk_size > self.prefill_chunk_size:
-                chunk_size = self.prefill_chunk_size
+        self.state_bag.increment_step_nr(prefill_len - 1)
 
-            chunk_end = chunk_begin + chunk_size
-
-            model_output = self._decode(self.seqs[:, chunk_begin:chunk_end])
-
-            self.state_bag.increment_step_nr(chunk_size)
-
+        if self.step_scores is not None:
             logits = model_output.logits
 
             if self.temperature != 1.0:
@@ -655,25 +589,15 @@ class _SamplingSequenceGeneratorOpBase(ABC):
             # (P, S_prm - 1, V)
             probs = softmax(logits, dim=-1, dtype=torch.float32)
 
-            if probs.isnan().any():
-                raise RuntimeError(
-                    "The model has produced one or more NaN probabilities during prefill. The sequence generator cannot continue."
-                )
+            # Fetch the scores of the next prompt step.
+            # (P, S_prm - 1, 1)
+            prompt_scores = torch.gather(
+                probs, dim=-1, index=self.seqs[:, 1:prefill_len].unsqueeze(-1)
+            )
 
-            if self.step_scores is not None:
-                s = slice(chunk_begin + 1, chunk_end + 1)
-
-                # Fetch the scores of the next prompt step.
-                # (P, S_prm - 1, 1)
-                prompt_scores = torch.gather(
-                    probs, dim=-1, index=self.seqs[:, s].unsqueeze(-1)
-                )
-
-                # Bootstrap the step scores.
-                # (P, S_prm - 1)
-                self.step_scores[:, s] = prompt_scores.squeeze(-1)
-
-            chunk_begin += chunk_size
+            # Bootstrap the step scores.
+            # (P, S_prm - 1)
+            self.step_scores[:, 1:prefill_len] = prompt_scores.squeeze(-1)
 
         if self.step_hooks:
             seqs = self.seqs[:, :prefill_len]
@@ -702,11 +626,6 @@ class _SamplingSequenceGeneratorOpBase(ABC):
 
         # (N, 1, V) -> (N, V)
         probs.squeeze_(1)
-
-        if probs.isnan().any():
-            raise RuntimeError(
-                f"The model has produced one or more NaN probabilities at step {self.step_nr}. The sequence generator cannot continue."
-            )
 
         # If we are generating the last possible step, force it to be EOS
         # regardless of its score.
@@ -889,9 +808,7 @@ class _SamplingSequenceGeneratorOp(_SamplingSequenceGeneratorOpBase):
         temperature: float,
         unk_penalty: float,
         len_penalty: float,
-        prefill_chunk_size: Optional[int],
-        decode_capacity_increment: Optional[int],
-        step_processors: List[StepProcessor],
+        step_processors: Sequence[StepProcessor],
         step_hooks: Dict[int, StepHook],
     ) -> None:
         super().__init__(
@@ -909,8 +826,6 @@ class _SamplingSequenceGeneratorOp(_SamplingSequenceGeneratorOpBase):
             temperature,
             unk_penalty,
             len_penalty,
-            prefill_chunk_size,
-            decode_capacity_increment,
             step_processors,
             step_hooks,
         )
@@ -951,9 +866,7 @@ class _SamplingSeq2SeqGeneratorOp(_SamplingSequenceGeneratorOpBase):
         temperature: float,
         unk_penalty: float,
         len_penalty: float,
-        prefill_chunk_size: Optional[int],
-        decode_capacity_increment: Optional[int],
-        step_processors: List[StepProcessor],
+        step_processors: Sequence[StepProcessor],
         step_hooks: Dict[int, StepHook],
     ) -> None:
         super().__init__(
@@ -971,8 +884,6 @@ class _SamplingSeq2SeqGeneratorOp(_SamplingSequenceGeneratorOpBase):
             temperature,
             unk_penalty,
             len_penalty,
-            prefill_chunk_size,
-            decode_capacity_increment,
             step_processors,
             step_hooks,
         )

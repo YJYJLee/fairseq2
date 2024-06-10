@@ -5,15 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
+import shutil
 import sys
 from abc import ABC, abstractmethod
 from contextlib import ExitStack
 from hashlib import sha1
-from pathlib import Path
-from shutil import rmtree
+from pathlib import Path, PurePath
 from tarfile import TarFile, is_tarfile
 from tempfile import NamedTemporaryFile
-from typing import Dict, Iterator, Optional, final
+from typing import Dict, Optional, final
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlparse
 from urllib.request import Request, urlopen
@@ -22,7 +22,6 @@ from zipfile import BadZipFile, ZipFile
 from tqdm import tqdm  # type: ignore[import]
 
 from fairseq2.assets.error import AssetError
-from fairseq2.assets.utils import _get_path_from_env, _starts_with_scheme
 from fairseq2.typing import finaloverride
 
 
@@ -37,7 +36,6 @@ class AssetDownloadManager(ABC):
         *,
         shard_idx: Optional[int] = None,
         force: bool = False,
-        cache_only: bool = False,
         progress: bool = True,
     ) -> Path:
         """Download the checkpoint at ``uri`` to the asset cache directory.
@@ -50,8 +48,6 @@ class AssetDownloadManager(ABC):
             The shard to download if the checkpoint is sharded.
         :param force:
             If ``True``, downloads the checkpoint even if it is already in cache.
-        :param cache_only:
-            If ``True``, skips the download and returns the cached checkpoint.
         :param progress:
             If ``True``, displays a progress bar to stderr.
 
@@ -67,7 +63,6 @@ class AssetDownloadManager(ABC):
         *,
         tokenizer_name: Optional[str] = None,
         force: bool = False,
-        cache_only: bool = False,
         progress: bool = True,
     ) -> Path:
         """Download the tokenizer at ``uri`` to the asset cache directory.
@@ -80,8 +75,6 @@ class AssetDownloadManager(ABC):
             The name of the tokenizer.
         :param force:
             If ``True``, downloads the tokenizer even if it is already in cache.
-        :param cache_only:
-            If ``True``, skips the download and returns the cached tokenizer.
         :param progress:
             If ``True``, displays a progress bar to stderr.
 
@@ -96,7 +89,6 @@ class AssetDownloadManager(ABC):
         dataset_name: str,
         *,
         force: bool = False,
-        cache_only: bool = False,
         progress: bool = True,
     ) -> Path:
         """Download the dataset at ``uri`` to the asset cache directory.
@@ -107,8 +99,6 @@ class AssetDownloadManager(ABC):
             The name of the dataset.
         :param force:
             If ``True``, downloads the dataset even if it is already in cache.
-        :param cache_only:
-            If ``True``, skips the download and returns the cached dataset.
         :param progress:
             If ``True``, displays a progress bar to stderr.
 
@@ -119,20 +109,7 @@ class AssetDownloadManager(ABC):
 
 @final
 class InProcAssetDownloadManager(AssetDownloadManager):
-    """Downloads assets in this process."""
-
-    cache_dir: Path
-
-    def __init__(self) -> None:
-        cache_dir = _get_path_from_env("FAIRSEQ2_CACHE_DIR", missing_ok=True)
-        if cache_dir is None:
-            cache_dir = _get_path_from_env("XDG_CACHE_HOME")
-            if cache_dir is None:
-                cache_dir = Path("~/.cache").expanduser()
-
-            cache_dir = cache_dir.joinpath("fairseq2/assets").resolve()
-
-        self.cache_dir = cache_dir
+    """Downloads assets in the running process."""
 
     @finaloverride
     def download_checkpoint(
@@ -142,7 +119,6 @@ class InProcAssetDownloadManager(AssetDownloadManager):
         *,
         shard_idx: Optional[int] = None,
         force: bool = False,
-        cache_only: bool = False,
         progress: bool = True,
     ) -> Path:
         display_name = f"checkpoint of {model_name}"
@@ -150,9 +126,7 @@ class InProcAssetDownloadManager(AssetDownloadManager):
         if shard_idx is not None:
             display_name = f"{display_name} (shard {shard_idx})"
 
-        op = _AssetDownloadOp(
-            self.cache_dir, uri, display_name, force, cache_only, progress, shard_idx
-        )
+        op = _AssetDownloadOp(uri, display_name, force, progress, shard_idx)
 
         return op.run()
 
@@ -164,7 +138,6 @@ class InProcAssetDownloadManager(AssetDownloadManager):
         *,
         tokenizer_name: Optional[str] = None,
         force: bool = False,
-        cache_only: bool = False,
         progress: bool = True,
     ) -> Path:
         if not tokenizer_name:
@@ -172,9 +145,7 @@ class InProcAssetDownloadManager(AssetDownloadManager):
         else:
             display_name = f"{tokenizer_name} tokenizer of {model_name}"
 
-        op = _AssetDownloadOp(
-            self.cache_dir, uri, display_name, force, cache_only, progress
-        )
+        op = _AssetDownloadOp(uri, display_name, force, progress)
 
         return op.run()
 
@@ -185,67 +156,53 @@ class InProcAssetDownloadManager(AssetDownloadManager):
         dataset_name: str,
         *,
         force: bool = False,
-        cache_only: bool = False,
         progress: bool = True,
     ) -> Path:
         display_name = f"{dataset_name} dataset"
 
-        op = _AssetDownloadOp(
-            self.cache_dir, uri, display_name, force, cache_only, progress
-        )
+        op = _AssetDownloadOp(uri, display_name, force, progress)
 
         return op.run()
 
 
 class _AssetDownloadOp:
-    cache_dir: Path
     uri: str
-    uri_params: Dict[str, str]
-    asset_dir: Optional[Path]
+    params: Dict[str, str]
+    download_path: Optional[Path]
+    download_filename: Optional[str]
     display_name: str
     force: bool
-    cache_only: bool
     progress: bool
     shard_idx: Optional[int]
 
     def __init__(
         self,
-        cache_dir: Path,
         uri: str,
         display_name: str,
         force: bool,
-        cache_only: bool,
         progress: bool,
         shard_idx: Optional[int] = None,
     ) -> None:
-        self.cache_dir = cache_dir
         self.uri = uri
-        self.uri_params = {}
-        self.asset_dir = None
+        self.params = {}
+        self.download_path = None
+        self.download_filename = None
         self.display_name = display_name
         self.force = force
-        self.cache_only = cache_only
         self.progress = progress
         self.shard_idx = shard_idx
 
     def run(self) -> Path:
         self._process_input_uri()
 
-        self._format_uri_with_shard_index()
+        self._format_uri_with_shard_idx()
 
         self._check_if_gated_asset()
 
         if (asset_path := self._try_uri_as_path()) is not None:
-            if not asset_path.exists():
-                raise AssetError(
-                    f"The {self.display_name} cannot be found at {asset_path}."
-                )
-
             return asset_path
 
-        self._resolve_asset_dirname()
-
-        self._prepare_op()
+        self._init_download_path()
 
         self._download_asset()
 
@@ -254,19 +211,16 @@ class _AssetDownloadOp:
         return self._get_final_asset_path()
 
     def _process_input_uri(self) -> None:
-        uri = self.uri
+        if self.uri.find("://") >= 0:
+            uri = self.uri
+        else:
+            uri = "file://" + self.uri
 
         try:
-            if uri.startswith("file://"):
-                uri = uri[7:]
-
-            if not _starts_with_scheme(uri):
-                uri = Path(uri).as_uri()  # Normalize.
-
             parsed_uri = urlparse(uri)
         except ValueError as ex:
             raise ValueError(
-                f"`uri` must be a URI or an absolute pathname, but is '{uri}' instead."
+                f"`uri` must be a valid URI, but is '{uri}' instead."
             ) from ex
 
         if parsed_uri.params:
@@ -274,7 +228,7 @@ class _AssetDownloadOp:
                 key_value_pair = param.split("=")
                 if len(key_value_pair) != 2:
                     raise ValueError(
-                        f"`uri` must be a URI or an absolute pathname, but is '{uri}' instead."
+                        f"`uri` must be a valid URI, but is '{uri}' instead."
                     )
 
                 key, value = key_value_pair
@@ -282,14 +236,25 @@ class _AssetDownloadOp:
                 key = unquote(key).strip()
                 if len(key) == 0:
                     raise ValueError(
-                        f"`uri` must be a URI or an absolute pathname, but is '{uri}' instead."
+                        f"`uri` must be a valid URI, but is '{uri}' instead."
                     )
 
-                self.uri_params[key.lower()] = unquote(value).strip()
+                self.params[key.lower()] = unquote(value).strip()
+
+        if parsed_uri.scheme == "file" and parsed_uri.netloc:
+            raise ValueError(
+                f"`uri` has the 'file' scheme and must have an absolute pathname, but is '{uri}' instead."
+            )
+
+        path = PurePath(parsed_uri.path)
+
+        self.download_filename = path.name
+        if not self.download_filename:
+            raise ValueError(f"`uri` must point to a file, but is '{uri}' instead.")
 
         self.uri = parsed_uri._replace(params="").geturl()
 
-    def _format_uri_with_shard_index(self) -> None:
+    def _format_uri_with_shard_idx(self) -> None:
         if self.shard_idx is None:
             return
 
@@ -303,7 +268,7 @@ class _AssetDownloadOp:
         self.uri = uri_with_shard
 
     def _check_if_gated_asset(self) -> None:
-        if self.uri_params.get("gated", "false").strip().lower() == "true":
+        if self.params.get("gated", "false").strip().lower() == "true":
             raise AssetError(
                 f"The {self.display_name} is gated. Please visit {self.uri} to learn how to get access."
             )
@@ -314,106 +279,97 @@ class _AssetDownloadOp:
 
         return None
 
-    def _resolve_asset_dirname(self) -> None:
-        h = sha1(self.uri.encode()).hexdigest()
+    def _init_download_path(self) -> None:
+        assert self.download_filename is not None
 
-        h = h[:24]
+        cache_dir = self._get_path_from_env("FAIRSEQ2_CACHE_DIR")
+        if cache_dir is None:
+            cache_dir = self._get_path_from_env("XDG_CACHE_HOME")
+            if cache_dir is None:
+                cache_dir = Path("~/.cache")
 
-        self.asset_dir = self.cache_dir.joinpath(h)
+            cache_dir = cache_dir.joinpath("fairseq2")
 
-    def _prepare_op(self) -> None:
-        asset_dir = self.asset_dir
+        hash_ = sha1(self.uri.encode()).hexdigest()
 
-        assert asset_dir is not None
+        hash_ = hash_[:24]
 
-        if self.force and not self.cache_only:
-            if asset_dir.exists():
-                if self.progress:
-                    self._print_progress(
-                        f"Ignoring the cached {self.display_name}. `force` is set to `True`."
-                    )
+        cache_dir = cache_dir.expanduser().resolve()
 
-                try:
-                    rmtree(asset_dir)
-                except OSError as ex:
-                    raise AssetDownloadError(
-                        f"The asset cache directory of the {self.display_name} cannot be deleted. See nested exception for details."
-                    ) from ex
+        self.download_path = cache_dir.joinpath("assets", hash_, self.download_filename)
 
-            download_dir = asset_dir.with_suffix(".download")
-            if download_dir.exists():
-                try:
-                    rmtree(download_dir)
-                except OSError as ex:
-                    raise AssetDownloadError(
-                        f"The asset download directory of the {self.display_name} cannot be deleted. See nested exception for details."
-                    ) from ex
+    @staticmethod
+    def _get_path_from_env(var_name: str) -> Optional[Path]:
+        pathname = os.getenv(var_name)
+        if not pathname:
+            return None
 
-            download_dir = asset_dir.with_suffix(".download.tmp")
-            if download_dir.exists():
-                try:
-                    rmtree(download_dir)
-                except OSError as ex:
-                    raise AssetDownloadError(
-                        f"The asset download directory of the {self.display_name} cannot be deleted. See nested exception for details."
-                    ) from ex
-        else:
-            if asset_dir.exists():
-                # Touch the asset directory so that we can maintain an LRU list
+        try:
+            return Path(pathname)
+        except ValueError as ex:
+            raise RuntimeError(
+                f"`{var_name}` environment variable must contain a valid pathname, but contains '{pathname}' instead."
+            ) from ex
+
+    def _download_asset(self) -> None:
+        assert self.download_path is not None
+
+        dir_path = self.download_path.parent
+
+        if dir_path.exists():
+            if not self.force:
+                # Touch the cache directory so that we can maintain an LRU list
                 # for cache cleanup.
                 try:
-                    asset_dir.touch()
+                    dir_path.touch()
                 except OSError:
                     pass
 
                 if self.progress:
-                    if self.cache_only:
-                        self._print_progress(f"Using the cached {self.display_name}.")
-                    else:
-                        self._print_progress(
-                            f"Using the cached {self.display_name}. Set `force` to `True` to download again."
-                        )
+                    self._print_progress(
+                        f"Using the cached {self.display_name}. Set `force` to `True` to download again."
+                    )
 
-    def _download_asset(self) -> None:
-        if self.cache_only:
-            return
+                return
 
-        assert self.asset_dir is not None
+            if self.progress:
+                self._print_progress(
+                    f"Ignoring the cached {self.display_name}. `force` is set to `True`."
+                )
 
-        download_dir = self.asset_dir.with_suffix(".download")
-
-        # Check if we have already downloaded the asset in a previous call.
-        if self.asset_dir.exists() or download_dir.exists():
-            return
+            try:
+                shutil.rmtree(dir_path)
+            except OSError as ex:
+                raise AssetDownloadError(
+                    f"The asset cache directory for {self.display_name} cannot be cleaned up. See nested exception for details."
+                ) from ex
 
         succeeded = False
 
         with ExitStack() as cleanup_stack:
-            tmp_dir = self.asset_dir.with_suffix(".download.tmp")
-
             try:
-                tmp_dir.mkdir(parents=True, exist_ok=True)
+                dir_path.mkdir(parents=True, exist_ok=True)
             except OSError as ex:
-                raise AssetError(
-                    f"The asset download directory of the {self.display_name} cannot be created. See nested exception for details."
+                raise AssetDownloadError(
+                    f"The asset cache directory for {self.display_name} cannot be created. See nested exception for details."
                 ) from ex
 
-            def remove_tmp_dir() -> None:
+            def remove_cache_dir() -> None:
                 if not succeeded:
                     try:
-                        rmtree(tmp_dir)
+                        shutil.rmtree(dir_path)
                     except OSError:
                         pass
 
-            cleanup_stack.callback(remove_tmp_dir)
+            cleanup_stack.callback(remove_cache_dir)
 
             if self.progress:
                 self._print_progress(f"Downloading the {self.display_name}...")
 
             request = Request(
                 self.uri,
-                # Most hosting providers return 403 if the user-agent is not a
-                # well-known string. Act like Firefox.
+                # Most hosting providers return 403 if the user-agent is not
+                # known. Act like we are Firefox.
                 headers={
                     "User-Agent": "Mozilla/5.0 (X11; Linux i686; rv:109.0) Gecko/20100101 Firefox/119.0"
                 },
@@ -438,12 +394,12 @@ class _AssetDownloadOp:
                 size = None
 
             fp = cleanup_stack.enter_context(
-                NamedTemporaryFile(delete=False, dir=tmp_dir)
+                NamedTemporaryFile(delete=False, dir=dir_path)
             )
 
             num_bytes_read = 0
 
-            progress_bar = cleanup_stack.enter_context(
+            bar = cleanup_stack.enter_context(
                 tqdm(
                     total=size,
                     disable=not self.progress,
@@ -461,12 +417,12 @@ class _AssetDownloadOp:
                         f"The download of the {self.display_name} has failed with the HTTP error code {ex.code}."
                     )
 
-                buffer_len = len(buffer)
-                if buffer_len == 0:
+                len_buffer = len(buffer)
+                if len_buffer == 0:
                     break
 
                 if size is not None:
-                    num_bytes_read += buffer_len
+                    num_bytes_read += len_buffer
                     if num_bytes_read > size:
                         raise AssetDownloadError(
                             f"The download of the {self.display_name} has failed. The number of bytes sent by the server exceeded the expected size of {size:,} bytes."
@@ -474,7 +430,7 @@ class _AssetDownloadOp:
 
                 fp.write(buffer)
 
-                progress_bar.update(buffer_len)
+                bar.update(len_buffer)
 
             if size is not None and num_bytes_read < size:
                 raise AssetDownloadError(
@@ -483,168 +439,76 @@ class _AssetDownloadOp:
 
             fp.close()
 
-            try:
-                filename = Path(urlparse(response.geturl()).path).name
-            except ValueError:
-                filename = "asset"
-
-            asset_file = tmp_dir.joinpath(filename)
-
-            try:
-                os.replace(fp.name, asset_file)
-            except OSError:
-                raise AssetError(
-                    f"The {self.display_name} cannot be saved to the asset download directory. See nested exception for details."
-                )
-
-            try:
-                tmp_dir.replace(download_dir)
-            except OSError:
-                raise AssetError(
-                    f"The asset download directory of the {self.display_name} cannot be renamed. See nested exception for details."
-                )
+            shutil.move(fp.name, self.download_path)
 
             succeeded = True
 
     def _ensure_asset_extracted(self) -> None:
-        if self.cache_only:
-            return
+        assert self.download_path is not None
 
-        asset_dir = self.asset_dir
-
-        assert asset_dir is not None
-
-        download_dir = asset_dir.with_suffix(".download")
+        download_path = self.download_path
 
         # Check if we have already extracted the asset.
-        if not download_dir.exists():
+        if not download_path.exists():
             return
 
-        try:
-            asset_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as ex:
-            raise AssetError(
-                f"The asset cache directory of the {self.display_name} cannot be created. See nested exception for details."
-            ) from ex
+        if download_path.suffix == ".zip":
+            if self.progress:
+                self._print_progress(f"Extracting the {self.display_name}...")
 
-        def iter_dir() -> Iterator[Path]:
             try:
-                for path in download_dir.iterdir():
-                    yield path
-            except OSError as ex:
+                with ZipFile(download_path) as fp:
+                    fp.extractall(path=download_path.parent)
+            except (KeyError, IOError, BadZipFile) as ex:
                 raise AssetError(
-                    f"The asset download directory of the {self.display_name} cannot be traversed. See nested exception for details."
+                    f"The zip file of the {self.display_name} ({download_path}) cannot be extracted. See nested exception for details."
                 ) from ex
 
-        for asset_path in iter_dir():
-            # There are various file types (e.g. PyTorch tensor files) that
-            # internally use the zip format. To be on the safe side we only
-            # extract files that have the '.zip' suffix.
-            if asset_path.suffix == ".zip":
-                if self.progress:
-                    self._print_progress(f"Extracting the {self.display_name}...")
+            try:
+                os.unlink(download_path)
+            except OSError:
+                pass
+        elif is_tarfile(download_path):
+            if self.progress:
+                self._print_progress(f"Extracting the {self.display_name}...")
 
-                try:
-                    with ZipFile(asset_path) as zip_fp:
-                        zip_fp.extractall(path=asset_dir)
-                except (KeyError, OSError, BadZipFile) as ex:
-                    raise AssetError(
-                        f"The {self.display_name} cannot be extracted. See nested exception for details."
-                    ) from ex
+            try:
+                with TarFile(download_path) as fp:
+                    fp.extractall(path=download_path.parent)
+            except (KeyError, IOError) as ex:
+                raise AssetError(
+                    f"The tar file of the {self.display_name} ({download_path}) cannot be extracted. See nested exception for details."
+                ) from ex
 
-                try:
-                    asset_path.unlink()
-                except OSError:
-                    pass
-            elif is_tarfile(asset_path):
-                if self.progress:
-                    self._print_progress(f"Extracting the {self.display_name}...")
-
-                try:
-                    with TarFile(asset_path) as tar_fp:
-                        tar_fp.extractall(path=asset_dir)
-                except (KeyError, OSError) as ex:
-                    raise AssetError(
-                        f"The {self.display_name} cannot be extracted. See nested exception for details."
-                    ) from ex
-
-                try:
-                    asset_path.unlink()
-                except OSError:
-                    pass
-            else:
-                try:
-                    asset_path.replace(asset_dir.joinpath(asset_path.name))
-                except OSError as ex:
-                    raise AssetError(
-                        f"The {self.display_name} cannot be moved to the asset cache directory. See nested exception for details."
-                    ) from ex
-
-        try:
-            rmtree(download_dir)
-        except OSError as ex:
-            raise AssetError(
-                f"The asset download directory of the {self.display_name} cannot be deleted. See nested exception for details."
-            ) from ex
+            try:
+                os.unlink(download_path)
+            except OSError:
+                pass
 
     def _get_final_asset_path(self) -> Path:
-        asset_dir = self.asset_dir
+        assert self.download_path is not None
 
-        assert asset_dir is not None
+        # If the asset is a standalone file (i.e. no zip or tar), ignore the
+        # 'path' parameter and return the download path.
+        if self.download_path.exists():
+            return self.download_path
 
-        if self.cache_only:
-            download_dir = asset_dir.with_suffix(".download")
+        dir_path = self.download_path.parent
 
-            # If the asset directory is not found, or if the download/extraction
-            # is not finished yet, raise an error.
-            if not asset_dir.exists() or download_dir.exists():
-                raise AssetError(
-                    f"The {self.display_name} cannot be found. Set `cache_only` to `False` to download it."
-                )
-        else:
-            assert asset_dir.exists()
+        rel_pathname = self.params.get("path", "")
+        if len(rel_pathname) == 0:
+            return dir_path
 
-        asset_path = None
+        rel_path = dir_path.joinpath(rel_pathname).resolve()
 
-        asset_pathname = self.uri_params.get("path")
-        if asset_pathname:
-            asset_path = asset_dir.joinpath(asset_pathname).resolve()
-
-            try:
-                asset_path.relative_to(asset_dir)
-            except ValueError as ex:
-                raise AssetError(
-                    f"The 'path' URI parameter of the {self.display_name} ({asset_pathname}) points to a path outside of the asset cache directory."
-                ) from ex
-
-            if not asset_path.exists():
-                raise AssetError(
-                    f"The {self.display_name} cannot be found. Please set `force` to `True` and, if the problem persists, file a bug report."
-                )
-
-            return asset_path
-
-        # If we have a single file under the asset directory, return the path of
-        # the file; otherwise, return the path of the directory.
         try:
-            for path in asset_dir.iterdir():
-                if asset_path is not None or not path.is_file():
-                    asset_path = asset_dir
-
-                    break
-
-                asset_path = path
-        except OSError as ex:
+            rel_path.relative_to(dir_path)
+        except ValueError:
             raise AssetError(
-                f"The asset cache directory of the {self.display_name} cannot be traversed. See nested exception for details."
-            ) from ex
-
-        if asset_path is None:
-            raise AssetError(
-                f"The asset cache directory of the {self.display_name} is empty. Please set `force` to `True` and, if the problem persists, file a bug report."
+                f"The 'path' URI parameter of the {self.display_name} ({rel_pathname}) points to a path outside of the asset cache directory."
             )
 
-        return asset_path
+        return rel_path
 
     @staticmethod
     def _print_progress(s: str) -> None:

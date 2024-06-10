@@ -4,21 +4,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import logging
 import os
 from abc import ABC, abstractmethod
-from datetime import timedelta
 from enum import Enum
-from typing import Optional, final
+from typing import final
 
 import torch
 import torch.distributed as dist
 from torch import Tensor
-from torch.distributed import ProcessGroup, ReduceOp
+from torch.distributed import ProcessGroup, ReduceOp  # type: ignore[attr-defined]
 
-from fairseq2.typing import CPU, Device, finaloverride
-
-logger = logging.getLogger(__name__)
+from fairseq2.typing import Device, finaloverride
 
 
 class ReduceOperation(Enum):
@@ -53,20 +49,16 @@ class Gang(ABC):
         self.device = device
 
     @abstractmethod
-    def close(self) -> None:
-        """Closes and destroys the gang."""
-
-    @abstractmethod
     def as_process_group(self) -> ProcessGroup:
         """Return this gang as a process group."""
 
     @abstractmethod
     def barrier(self) -> None:
-        """Synchronize all processes."""
+        """Synchronize all ranks."""
 
     @abstractmethod
     def all_reduce(self, tensor: Tensor, op: ReduceOperation) -> None:
-        """Reduce the tensor across all processes.
+        """Reduce the tensor across all ranks.
 
         :param tensor:
             The input and output tensor of the operation.
@@ -76,12 +68,12 @@ class Gang(ABC):
 
     @abstractmethod
     def all_gather(self, output_tensor: Tensor, input_tensor: Tensor) -> None:
-        """Gather tensors from all processes and put them in a single tensor.
+        """Gather tensors from all ranks and put them in a single tensor.
 
         :param output_tensor:
-            The output tensor to accomodate tensors from all processes.
+            The output tensor to accomodate tensor elements from all ranks.
         :param input_tensor:
-            The tensor to be gathered from this process.
+            The tensor to be gathered from the current rank.
         """
 
 
@@ -93,12 +85,8 @@ class FakeGang(Gang):
         super().__init__(rank=0, size=1, device=device)
 
     @finaloverride
-    def close(self) -> None:
-        pass
-
-    @finaloverride
     def as_process_group(self) -> ProcessGroup:
-        raise RuntimeError("`FakeGang` does not support conversion to a process group.")
+        raise RuntimeError("`FakeGang` does not support conversion to process group.")
 
     @finaloverride
     def barrier(self) -> None:
@@ -119,93 +107,6 @@ class ProcessGroupGang(Gang):
 
     pg: ProcessGroup
 
-    def __init__(self, pg: ProcessGroup, device: Device) -> None:
-        super().__init__(dist.get_rank(pg), dist.get_world_size(pg), device)
-
-        self.pg = pg
-
-    @staticmethod
-    def init_default_process_group(
-        *,
-        device: Optional[Device] = None,
-        timeout: Optional[timedelta] = None,
-        num_threads: Optional[int] = None,
-        warn_only: bool = False,
-        ok_initialized: bool = False,
-    ) -> Gang:
-        """Initialize the default process group and wrap it as a gang.
-
-        :param device:
-            If ``None``; if CUDA is available, the process group will be
-            initialized on an automatically selected CUDA device; otherwise,
-            it will be initialized on CPU.
-        :param timeout:
-            The timeout for operations executed against the process group.
-        :param num_threads:
-            The number of threads used for interaop parallelism.
-        :param warn_only:
-            If ``True``, logs a warning instead of raising an error if the
-            process group is not set up reliably.
-        :param ok_initialized:
-            If ``True``, does not raise an error if the process group is already
-            initialized.
-        """
-        if not dist.is_available():
-            raise RuntimeError("`torch.distributed` is not available.")
-
-        if dist.is_initialized():
-            if ok_initialized:
-                return ProcessGroupGang.from_default_process_group()
-
-            raise RuntimeError("The default process group is already initialized.")
-
-        num_procs = _get_num_processes()
-
-        if num_threads is None:
-            if num_procs > 1 and "OMP_NUM_THREADS" not in os.environ:
-                # To prevent thread oversubscription, we distribute cores evenly
-                # across workers.
-                num_threads = _get_num_cpus(num_procs)
-
-        if num_threads is not None:
-            torch.set_num_threads(num_threads)
-
-            logger.info("Setting the number of threads used for intraop parallelism to %d.", num_threads)  # fmt: skip
-
-        if device is None:
-            device = _determine_default_device()
-
-            assert device.type == "cpu" or device.type == "cuda"
-
-        if device.type == "cpu":
-            backend = "gloo"
-        elif device.type == "cuda":
-            backend = "nccl"
-        else:
-            raise RuntimeError(
-                f"Only CPU and CUDA devices are supported, but `device` is a {device.type.upper()} device."
-            )
-
-        if device.type == "cuda" and "NCCL_ASYNC_ERROR_HANDLING" not in os.environ:
-            if warn_only:
-                logger.warning("The default process group will use the NCCL backend, but the `NCCL_ASYNC_ERROR_HANDLING` environment variable is not set. Your collective communication calls can hang indefinitely. Learn more at https://github.com/pytorch/pytorch/issues/46874.")  # fmt: skip
-            else:
-                raise RuntimeError(
-                    "The default process group will use the NCCL backend, but the `NCCL_ASYNC_ERROR_HANDLING` environment variable is not set. Learn more at https://github.com/pytorch/pytorch/issues/46874."
-                )
-
-        if timeout is None:
-            timeout = timedelta(minutes=15)
-
-        dist.init_process_group(backend, timeout=timeout)
-
-        if dist.group.WORLD is None:
-            raise RuntimeError(
-                "The default process group is not available. Please file a bug report."
-            )
-
-        return ProcessGroupGang(dist.group.WORLD, device)
-
     @staticmethod
     def from_process_group(pg: ProcessGroup, device: Device) -> Gang:
         """Wrap ``pg`` as a gang.
@@ -219,23 +120,30 @@ class ProcessGroupGang(Gang):
 
     @staticmethod
     def from_default_process_group() -> Gang:
-        """Wrap the default process group as a gang."""
+        """Wrap the default process group as a gang.
+
+        The default process group will be initialized as part of this function
+        if it is not already initialized. If CUDA is available, NCCL; otherwise,
+        Gloo backend will be used.
+        """
         if not dist.is_available():
             raise RuntimeError("`torch.distributed` is not available.")
 
-        if not dist.is_initialized():
-            raise RuntimeError("The default process group is not initialized.")
+        if dist.is_initialized():
+            backend = dist.get_backend()
 
-        backend = dist.get_backend()
-
-        if backend == "gloo":
-            device = CPU
-        elif backend == "nccl":
-            device = _determine_default_cuda_device()
+            if backend == "gloo":
+                device = Device("cpu")
+            elif backend == "nccl":
+                device = _determine_default_cuda_device()
+            else:
+                raise RuntimeError(
+                    f"Only `nccl` and `gloo` backends are supported for device selection, but the process group uses the `{backend}` backend."
+                )
         else:
-            raise RuntimeError(
-                f"Only `nccl` and `gloo` backends are supported, but the process group uses the `{backend}` backend."
-            )
+            device = _determine_default_device()
+
+            dist.init_process_group("nccl" if device.type == "cuda" else "gloo")
 
         if dist.group.WORLD is None:
             raise RuntimeError(
@@ -244,9 +152,10 @@ class ProcessGroupGang(Gang):
 
         return ProcessGroupGang(dist.group.WORLD, device)
 
-    @finaloverride
-    def close(self) -> None:
-        dist.destroy_process_group(self.pg)
+    def __init__(self, pg: ProcessGroup, device: Device) -> None:
+        super().__init__(dist.get_rank(pg), dist.get_world_size(pg), device)
+
+        self.pg = pg
 
     @finaloverride
     def as_process_group(self) -> ProcessGroup:
@@ -282,104 +191,42 @@ class ProcessGroupGang(Gang):
         )
 
 
-def _get_num_cpus(num_procs: int) -> int:
-    num_cpus = os.cpu_count()
-    if num_cpus is None:
-        logger.warning("The number of CPU cores cannot be determined.")
-
-        return 1
-
-    max_num_cpus = max(num_cpus // num_procs, 1)
-
-    # We should not exceed the number of cores available in the affinity mask.
-    return min(max_num_cpus, len(os.sched_getaffinity(0)))
-
-
 def _determine_default_device() -> Device:
     if torch.cuda.is_available() and torch.cuda.device_count() > 0:
         return _determine_default_cuda_device()
 
-    return CPU
+    return Device("cpu")
 
 
 def _determine_default_cuda_device() -> Device:
-    visible_devices = os.getenv("CUDA_VISIBLE_DEVICES")
-    if visible_devices is not None:
-        try:
-            int(visible_devices)
-        except ValueError:
-            # If we are here, it means CUDA_VISIBLE_DEVICES is a list instead of
-            # a single device index.
-            device = None
-        else:
-            device = Device("cuda", index=0)
+    num_devices = torch.cuda.device_count()
 
-    if device is None:
-        num_devices = torch.cuda.device_count()
+    # We use the `LOCAL_RANK` environment variable to determine which GPU to
+    # pick in case the process has more than one GPU available.
+    local_rank_env = os.getenv("LOCAL_RANK")
+    if local_rank_env is None:
+        if num_devices > 1:
+            raise RuntimeError(
+                f"The default device cannot be determined. There are {num_devices} GPUs available, but the `LOCAL_RANK` environment variable is not set."
+            )
 
-        idx = _get_device_index(num_devices, device_name="CUDA")
+        return Device("cuda", index=0)
 
-        device = Device("cuda", index=idx)
+    try:
+        local_rank = int(local_rank_env)
+    except ValueError:
+        raise RuntimeError(
+            f"The value of the `LOCAL_RANK` environment variable must be an integer, but is '{local_rank_env}' instead."
+        )
+
+    if local_rank >= num_devices:
+        raise RuntimeError(
+            f"The value of the `LOCAL_RANK` environment variable must be less than the number of available GPUs ({num_devices}), but is {local_rank} instead."
+        )
+
+    device = Device("cuda", index=local_rank)
 
     # As of PyTorch 2.0, FSDP fails to work if the default device is not set.
     torch.cuda.set_device(device)
 
     return device
-
-
-def _get_device_index(num_devices: int, device_name: str) -> int:
-    assert num_devices > 0
-
-    # We use the `LOCAL_RANK` environment variable to determine which GPU to
-    # pick in case the process has more than one GPU available.
-    device_idx = _get_int_from_env("LOCAL_RANK")
-    if device_idx is None:
-        if num_devices > 1:
-            raise RuntimeError(
-                f"The default {device_name} device cannot be determined. There are {num_devices} {device_name} devices available, but the `LOCAL_RANK` environment variable is not set."
-            )
-
-        return 0
-
-    if device_idx < 0:
-        raise RuntimeError(
-            f"The value of the `LOCAL_RANK` environment variable must be greater than or equal to 0, but is {device_idx} instead."
-        )
-
-    if device_idx >= num_devices:
-        raise RuntimeError(
-            f"The value of the `LOCAL_RANK` environment variable must be less than the number of available {device_name} devices ({num_devices}), but is {device_idx} instead."
-        )
-
-    return device_idx
-
-
-def _get_num_processes() -> int:
-    num_procs = _get_int_from_env("LOCAL_WORLD_SIZE")
-    if num_procs is None:
-        return 1
-
-    if num_procs <= 0:
-        raise RuntimeError(
-            f"The value of the `LOCAL_WORLD_SIZE` environment variable must be greater than 0, but is {num_procs} instead."
-        )
-
-    return num_procs
-
-
-def _get_int_from_env(var_name: str) -> Optional[int]:
-    value = os.getenv(var_name)
-    if value is None:
-        return None
-
-    try:
-        return int(value)
-    except ValueError:
-        raise RuntimeError(
-            f"The value of the `{var_name}` environment variable must be an integer, but is '{value}' instead."
-        )
-
-
-def get_global_rank() -> int:
-    """Return the global rank of this process in the running job."""
-    return _get_int_from_env("RANK") or 0

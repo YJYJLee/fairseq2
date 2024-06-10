@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from os import PathLike
+import os
 from pathlib import Path
 
 import pytest
@@ -128,18 +128,6 @@ class TestAssetCard:
 
         assert value2 == []
 
-    def test_as_list_works(self) -> None:
-        value = self.card.field("field7").as_list(int)
-
-        assert value == [1, 2, 3, 2]
-
-    def test_as_list_raises_error_when_field_is_not_a_valid_list(self) -> None:
-        with pytest.raises(
-            AssetCardError,
-            match=rf"The elements of the field 'field7' of the asset card 'test-card' must be of type `{str}`, but the element at index 0 is of type `{int}` instead\.$",
-        ):
-            self.card.field("field7").as_list(str)
-
     def test_as_dict_works(self) -> None:
         value = self.card.field("field2").as_dict(str)
 
@@ -148,9 +136,21 @@ class TestAssetCard:
     def test_as_dict_raises_error_when_field_is_not_a_valid_dict(self) -> None:
         with pytest.raises(
             AssetCardError,
-            match=rf"The items of the field 'field2' of the asset card 'test-card' must be of type `{int}`, but the item 'sub-field2' is of type `{str}` instead\.$",
+            match=rf"The elements of the field 'field2' of the asset card 'test-card' must be of type `{int}`, but at least one element is of type `{str}` instead\.$",
         ):
             self.card.field("field2").as_dict(int)
+
+    def test_as_list_works(self) -> None:
+        value = self.card.field("field7").as_list(int)
+
+        assert value == [1, 2, 3, 2]
+
+    def test_as_list_raises_error_when_field_is_not_a_valid_list(self) -> None:
+        with pytest.raises(
+            AssetCardError,
+            match=rf"The elements of the field 'field7' of the asset card 'test-card' must be of type `{str}`, but at least one element is of type `{int}` instead\.$",
+        ):
+            self.card.field("field7").as_list(str)
 
     def test_as_set_works(self) -> None:
         value = self.card.field("field7").as_set(int)
@@ -160,7 +160,7 @@ class TestAssetCard:
     def test_as_set_raises_error_when_field_is_not_a_valid_set(self) -> None:
         with pytest.raises(
             AssetCardError,
-            match=rf"The elements of the field 'field7' of the asset card 'test-card' must be of type `{str}`, but the element at index 0 is of type `{int}` instead\.$",
+            match=rf"The elements of the field 'field7' of the asset card 'test-card' must be of type `{str}`, but at least one element is of type `{int}` instead\.$",
         ):
             self.card.field("field7").as_set(str)
 
@@ -177,11 +177,9 @@ class TestAssetCard:
             self.card.field("field1").as_one_of({"foo3", "foo2"})
 
     def test_as_uri_works(self) -> None:
-        self.card.field("field1").set("/foo1/foo2/")
-
         value = self.card.field("field1").as_uri()
 
-        assert value == "file:///foo1/foo2"
+        assert value == "file:///foo1"
 
         value = self.card.field("field9").as_uri()
 
@@ -196,16 +194,9 @@ class TestAssetCard:
     def test_as_uri_raises_error_when_field_type_is_incorrect(self) -> None:
         with pytest.raises(
             AssetCardError,
-            match=rf"The value of the field 'field3' of the asset card 'test-card' must be of type `{str}` or `{PathLike}`, but is of type `{int}` instead\.$",
+            match=rf"The value of the field 'field3' of the asset card 'test-card' must be of type `{str}` or `{os.PathLike}`, but is of type `{int}` instead\.$",
         ):
             self.card.field("field3").as_uri()
-
-    def test_as_uri_raises_error_when_field_is_not_uri_or_absolute_path(self) -> None:
-        with pytest.raises(
-            AssetCardError,
-            match=r"The value of the field 'field1' of the asset card 'test-card' must be a URI or an absolute pathname, but is 'foo1' instead\.$",
-        ):
-            self.card.field("field1").as_uri()
 
     def test_as_filename_works(self) -> None:
         value = self.card.field("field1").as_filename()

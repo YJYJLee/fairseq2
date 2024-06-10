@@ -43,29 +43,16 @@ class IncrementalStateBag:
 
     step_nr: int
     max_num_steps: int
-    capacity_increment: Optional[int]
 
     _module_states: Dict[Module, IncrementalState]
 
-    def __init__(
-        self, max_num_steps: int, *, capacity_increment: Optional[int] = 16
-    ) -> None:
+    def __init__(self, max_num_steps: int) -> None:
         """
         :param max_num_steps:
             The expected maximum number of steps to take.
-        :param capacity_increment:
-            The sequence length capacity of state tensors will be incremented by
-            multiples of this value. If ``None``, state tensors will be
-            preallocated with a capacity of ``max_num_steps``.
         """
-        if capacity_increment is not None and capacity_increment < 1:
-            raise ValueError(
-                f"`capacity_increment` must be greater than or equal to 1, but is {capacity_increment} instead."
-            )
-
         self.step_nr = 0
         self.max_num_steps = max_num_steps
-        self.capacity_increment = capacity_increment
 
         self._module_states = {}
 
@@ -82,7 +69,7 @@ class IncrementalStateBag:
 
         if step_nr >= self.max_num_steps:
             raise ValueError(
-                f"The current step number ({self.step_nr}) with `value` increment ({value}) must be less than or equal to the maximum number of steps ({self.max_num_steps}), but is {self.step_nr + value} instead."
+                f"The current step number ({self.step_nr}) with `value` increment must be less than or equal to the maximum number of steps ({self.max_num_steps}), but is {self.step_nr + value} instead."
             )
 
         self.step_nr = step_nr
@@ -116,7 +103,7 @@ class IncrementalStateBag:
         self._module_states[m] = state
 
     def reorder(self, new_order: Tensor) -> None:
-        """Reorder the module states.
+        """Reorder all module states in the bag.
 
         See :meth:`IncrementalState.reorder` for more information.
         """
