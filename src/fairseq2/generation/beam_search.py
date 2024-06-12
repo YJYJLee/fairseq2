@@ -31,6 +31,9 @@ from fairseq2.nn.incremental_state import IncrementalStateBag
 from fairseq2.nn.padding import PaddingMask
 from fairseq2.typing import finaloverride, override
 
+import numpy as np
+import time
+
 
 @final
 class BeamSearchSequenceGenerator(SequenceGenerator):
@@ -248,10 +251,18 @@ class BeamSearchSeq2SeqGenerator(Seq2SeqGenerator):
         prompt_seqs: Tensor,
         prompt_padding_mask: Optional[PaddingMask],
     ) -> Seq2SeqGeneratorOutput:
+        seq_len = dict()
+        timer_result = dict()
+        seq_len["Encoder"] = source_seqs.shape[1]
+
         # (P, S)
-        encoder_output, encoder_padding_mask = self.model.encode(
+        torch.cuda.synchronize()
+        start_time = time.time()
+        encoder_output, encoder_padding_mask, gpu_util = self.model.encode(
             source_seqs, source_padding_mask
         )
+        torch.cuda.synchronize()
+        timer_result["Encoder"] = (time.time()-start_time)*1000
 
         if source_padding_mask is None:
             max_source_len = source_seqs.size(1)
@@ -274,6 +285,9 @@ class BeamSearchSeq2SeqGenerator(Seq2SeqGenerator):
                 f"`min_gen_len` must be less than or equal to `max_gen_len` ({max_gen_len}), but is {self.min_gen_len} instead. Adjust your `max_gen_len` argument."
             )
 
+
+        torch.cuda.synchronize()
+        start_time = time.time()
         op = _BeamSearchSeq2SeqGeneratorOp(
             self.model,
             encoder_output,
@@ -293,10 +307,12 @@ class BeamSearchSeq2SeqGenerator(Seq2SeqGenerator):
             self.step_processors,
             self._step_hooks,
         )
+        hypotheses, gpu_util2 = op()
+        torch.cuda.synchronize()
+        timer_result["Decoder"] = (time.time()-start_time)*1000
 
-        hypotheses = op()
-
-        return Seq2SeqGeneratorOutput(hypotheses, encoder_output, encoder_padding_mask)
+        seq_len["Decoder"] = op.min_prompt_len-1
+        return Seq2SeqGeneratorOutput(hypotheses, encoder_output, encoder_padding_mask), timer_result, seq_len, np.average(gpu_util+gpu_util2)
 
 
 class BeamSearchAlgorithm(ABC):
@@ -526,27 +542,33 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
         self.output = [[] for _ in range(num_prompts)]
 
     def __call__(self) -> List[List[Hypothesis]]:
-        self._prepare_state()
+        gpu_utils = []
+        gpu_util = self._prepare_state()
+        gpu_utils.append(gpu_util)
 
         for self.step_nr in range(self.min_prompt_len, self.max_seq_len):
-            if not self._step():
+            output, gpu_util = self._step()
+            gpu_utils.append(gpu_util)
+            if not output:
                 break
 
         # Sort the hypotheses by their scores before returning.
         for hypotheses in self.output:
             hypotheses.sort(key=lambda h: h.score, reverse=True)  # type: ignore[arg-type, return-value]
 
-        return self.output
+        return self.output, gpu_utils
 
     def _prepare_state(self) -> None:
         # Fast-forward to the first step that needs to be generated.
+        gpu_util = []
         if self.min_prompt_len > 1:
-            self._prefill()
-
+            gpu_util = self._prefill()
+        return gpu_util
+    
     def _prefill(self) -> None:
         prefill_len = self.min_prompt_len
 
-        model_output = self._decode(self.seqs[:, : prefill_len - 1])
+        model_output, gpu_util = self._decode(self.seqs[:, : prefill_len - 1])
 
         self.state_bag.increment_step_nr(prefill_len - 1)
 
@@ -578,10 +600,11 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
 
             for hook in self.step_hooks.values():
                 hook(self.prompt_indices, seqs, step_scores, prefill=True)
-
-    def _step(self) -> bool:
+        return gpu_util
+    
+    def _step(self) -> Tuple(bool, list):
         # Generate the next step output.
-        model_output = self._decode(self.seqs[:, self.step_nr - 1 : self.step_nr])
+        model_output, gpu_util = self._decode(self.seqs[:, self.step_nr - 1 : self.step_nr])
 
         self.state_bag.increment_step_nr()
 
@@ -652,7 +675,7 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
 
         # No beam left, we can return.
         if len(new_beam_sizes) == 0:
-            return False
+            return False, gpu_util
 
         self.beam_sizes = new_beam_sizes
 
@@ -675,7 +698,7 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
             for hook in self.step_hooks.values():
                 hook(self.prompt_indices, seqs, step_scores, prefill=False)
 
-        return True
+        return True, gpu_util
 
     def _search_beam(
         self, beam_idx: int, batch_offset: int, lprobs: Tensor, step_scores: Tensor
@@ -914,7 +937,7 @@ class _BeamSearchSeq2SeqGeneratorOp(_BeamSearchSequenceGeneratorOpBase):
 
     @override
     def _decode(self, seqs: Tensor) -> SequenceModelOutput:
-        decoder_output, decoder_padding_mask = self.model.decode(
+        decoder_output, decoder_padding_mask, gpu_util = self.model.decode(
             seqs,
             None,  # We never use PAD in incremental decoding.
             self.encoder_output,
@@ -922,7 +945,7 @@ class _BeamSearchSeq2SeqGeneratorOp(_BeamSearchSequenceGeneratorOpBase):
             state_bag=self.state_bag,
         )
 
-        return self.model.project(decoder_output, decoder_padding_mask)
+        return self.model.project(decoder_output, decoder_padding_mask), np.average(gpu_util)
 
     @override
     def _reorder_state(self, new_order: Tensor) -> None:

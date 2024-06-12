@@ -26,6 +26,7 @@ from fairseq2.nn.transformer.layer_norm import (
 from fairseq2.nn.transformer.norm_order import TransformerNormOrder
 from fairseq2.typing import DataType, Device, finaloverride
 
+import torch
 
 class TransformerEncoder(Module, ABC):
     """Represents a Transformer encoder."""
@@ -191,9 +192,10 @@ class StandardTransformerEncoder(TransformerEncoder):
             self_attn_mask = self.self_attn_mask_factory(
                 seqs, keys=seqs, training=self.training
             )
-
+        gpu_util = list()
         for layer_idx, layer in enumerate(self.layers.drop_iter()):
             seqs, padding_mask = layer(seqs, padding_mask, self_attn_mask)
+            gpu_util.append(torch.cuda.utilization(torch.cuda.current_device()))
 
             for hook in self._layer_output_hooks.values():
                 if not hook(layer_idx, seqs, padding_mask, num_layers):
@@ -202,7 +204,7 @@ class StandardTransformerEncoder(TransformerEncoder):
         if self.layer_norm is not None:
             seqs = self.layer_norm(seqs)
 
-        return seqs, padding_mask
+        return seqs, padding_mask, gpu_util
 
     def extra_repr(self) -> str:
         """:meta private:"""
