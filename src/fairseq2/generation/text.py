@@ -89,7 +89,7 @@ class SequenceToTextConverterBase(ABC):
         # (S) -> (N, S)
         target_prefix_seqs = self.target_prefix_seq.expand(batch_size, -1)
 
-        generator_output, decoding_step = self.generator(
+        generator_output = self.generator(
             source_seqs, source_padding_mask, target_prefix_seqs, None
         )
 
@@ -102,7 +102,7 @@ class SequenceToTextConverterBase(ABC):
                 )
             texts.append(self.text_decoder(hypotheses[0].seq))
 
-        return texts, generator_output, [str(source_seqs.shape[1]), str(np.average([hypotheses[0].seq.shape[0] for hypotheses in generator_output.hypotheses])), str(decoding_step)]
+        return texts, generator_output
 
 
 @final

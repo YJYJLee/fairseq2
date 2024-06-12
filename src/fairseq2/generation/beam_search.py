@@ -30,6 +30,7 @@ from fairseq2.models.sequence import SequenceModelOutput
 from fairseq2.nn.incremental_state import IncrementalStateBag
 from fairseq2.nn.padding import PaddingMask
 from fairseq2.typing import finaloverride, override
+import torch.profiler as profiler
 
 
 @final
@@ -293,9 +294,9 @@ class BeamSearchSeq2SeqGenerator(Seq2SeqGenerator):
             self._step_hooks,
         )
 
-        hypotheses, decoding_step = op()
+        hypotheses = op()
 
-        return Seq2SeqGeneratorOutput(hypotheses, encoder_output, encoder_padding_mask), decoding_step
+        return Seq2SeqGeneratorOutput(hypotheses, encoder_output, encoder_padding_mask)
 
 
 class BeamSearchAlgorithm(ABC):
@@ -527,10 +528,8 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
     def __call__(self) -> List[List[Hypothesis]]:
         self._prepare_state()
 
-        decoding_step = 0
         for self.step_nr in range(self.min_prompt_len, self.max_seq_len):
             output = self._step()
-            decoding_step+=1
             if not output:
                 break
 
@@ -538,7 +537,7 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
         for hypotheses in self.output:
             hypotheses.sort(key=lambda h: h.score, reverse=True)  # type: ignore[arg-type, return-value]
 
-        return self.output, decoding_step
+        return self.output
 
     def _prepare_state(self) -> None:
         # Fast-forward to the first step that needs to be generated.
@@ -661,7 +660,8 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
         # (N_new)
         next_step = BeamStep.merge(beam_next_step_list)
 
-        self._reorder_state(next_step.seq_indices)
+        with profiler.record_function("MODULE_KV_Cache_Reorder_AG"):
+            self._reorder_state(next_step.seq_indices)
 
         # Record the current step.
         self.seqs[:, self.step_nr] = next_step.vocab_indices
@@ -718,18 +718,20 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
         # (2 x B)
         eos_mask = next_step.vocab_indices == self.eos_idx
 
-        # Consider EOS only when it's among the top `beam_size` indices.
-        # (F)
-        eos_seq_indices = next_step.seq_indices[: self.beam_size].masked_select(
-            eos_mask[: self.beam_size]
-        )
+        with profiler.record_function("MODULE_Masked_Select_AG"):
+            # Consider EOS only when it's among the top `beam_size` indices.
+            # (F)
+            eos_seq_indices = next_step.seq_indices[: self.beam_size].masked_select(
+                eos_mask[: self.beam_size]
+            )
 
         # If one or more sequences have reached EOS, move them to the output.
         if len(eos_seq_indices) > 0:
-            # (F)
-            eos_scores = next_step.scores[: self.beam_size].masked_select(
-                eos_mask[: self.beam_size]
-            )
+            with profiler.record_function("MODULE_Masked_Select_AG"):
+                # (F)
+                eos_scores = next_step.scores[: self.beam_size].masked_select(
+                    eos_mask[: self.beam_size]
+                )
 
             for seq_idx, score in zip(eos_seq_indices, eos_scores):
                 # If `True`, it means we have found `beam_size` hypotheses for
@@ -739,8 +741,9 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
 
             # Filter out the sequences that have reached EOS.
             seq_mask = ~eos_mask
-
-            next_step = next_step.masked_select(seq_mask)
+            
+            with profiler.record_function("MODULE_Masked_Select_AG"):
+                next_step = next_step.masked_select(seq_mask)
 
         # We can have at most `beam_size` sequences in the beam.
         return next_step.first(self.beam_size)
