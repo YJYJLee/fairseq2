@@ -31,6 +31,7 @@ from fairseq2.nn.incremental_state import IncrementalStateBag
 from fairseq2.nn.padding import PaddingMask
 from fairseq2.typing import finaloverride, override
 
+import numpy as np
 
 @final
 class BeamSearchSequenceGenerator(SequenceGenerator):
@@ -248,10 +249,15 @@ class BeamSearchSeq2SeqGenerator(Seq2SeqGenerator):
         prompt_seqs: Tensor,
         prompt_padding_mask: Optional[PaddingMask],
     ) -> Seq2SeqGeneratorOutput:
+        seq_len = dict()
+        seq_len["Encoder"] = [source_seqs.shape[1]]
+
         # (P, S)
         encoder_output, encoder_padding_mask = self.model.encode(
             source_seqs, source_padding_mask
         )
+        seq_len["Encoder"] += [encoder_output.shape[1], 1]
+
         if source_padding_mask is None:
             max_source_len = source_seqs.size(1)
         else:
@@ -294,8 +300,9 @@ class BeamSearchSeq2SeqGenerator(Seq2SeqGenerator):
         )
 
         hypotheses, decoding_step = op()
-
-        return Seq2SeqGeneratorOutput(hypotheses, encoder_output, encoder_padding_mask), decoding_step
+        seq_len["Decoder"] = [op.min_prompt_len-1]
+        seq_len["Decoder"] += [np.average([h[0].seq.shape[0] for h in hypotheses]), decoding_step]
+        return Seq2SeqGeneratorOutput(hypotheses, encoder_output, encoder_padding_mask), seq_len
 
 
 class BeamSearchAlgorithm(ABC):
