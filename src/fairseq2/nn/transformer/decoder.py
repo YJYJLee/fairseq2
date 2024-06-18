@@ -228,7 +228,7 @@ class StandardTransformerDecoder(TransformerDecoder):
             self_attn_mask = self.self_attn_mask_factory(
                 seqs, keys=seqs, training=self.training, state_bag=state_bag
             )
-        gpu_util = list()
+
         for layer_idx, layer in enumerate(self.layers.drop_iter()):
             seqs, padding_mask = layer(
                 seqs,
@@ -238,7 +238,6 @@ class StandardTransformerDecoder(TransformerDecoder):
                 encoder_padding_mask,
                 state_bag=state_bag,
             )
-            gpu_util.append(torch.cuda.utilization(torch.cuda.current_device()))
             
             for hook in self._layer_output_hooks.values():
                 if not hook(layer_idx, seqs, padding_mask, num_layers):
@@ -247,7 +246,7 @@ class StandardTransformerDecoder(TransformerDecoder):
         if self.layer_norm is not None:
             seqs = self.layer_norm(seqs)
 
-        return seqs, padding_mask, gpu_util
+        return seqs, padding_mask
 
     def extra_repr(self) -> str:
         """:meta private:"""

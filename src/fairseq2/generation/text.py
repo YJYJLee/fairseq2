@@ -88,7 +88,7 @@ class SequenceToTextConverterBase(ABC):
         # (S) -> (N, S)
         target_prefix_seqs = self.target_prefix_seq.expand(batch_size, -1)
 
-        generator_output, timer_result, seq_len, gpu_util = self.generator(
+        generator_output, timer_result = self.generator(
             source_seqs, source_padding_mask, target_prefix_seqs, None
         )
 
@@ -102,7 +102,7 @@ class SequenceToTextConverterBase(ABC):
 
             texts.append(self.text_decoder(hypotheses[0].seq))
 
-        return texts, generator_output, timer_result, seq_len, gpu_util
+        return texts, generator_output, timer_result
 
 
 @final
