@@ -22,10 +22,12 @@ from fairseq2.nn.ops import repeat_interleave
 from fairseq2.nn.padding import PaddingMask
 from fairseq2.nn.position_encoder import PositionEncoder
 from fairseq2.nn.projection import Linear, Projection
-from fairseq2.nn.transformer.attention import SDPA, create_default_sdpa
+from fairseq2.nn.transformer.attention import NaiveSDPA, SDPA, create_default_sdpa
 from fairseq2.nn.transformer.attention_mask import AttentionMask, AttentionMaskFactory
 from fairseq2.typing import DataType, Device, finaloverride
 
+import os
+disable_sdpa = os.environ.get('DISABLE_SDPA', False)
 
 class MultiheadAttention(Module, ABC):
     """Represents a Transformer multi-head attention layer."""
@@ -329,10 +331,13 @@ class StandardMultiheadAttention(MultiheadAttention):
         else:
             self.register_module("pos_encoder", None)
 
-        if sdpa is not None:
-            self.sdpa = sdpa
+        if disable_sdpa:
+            self.sdpa = create_default_sdpa() if sdpa.__class__.__name__ != "ShawRelativePositionSDPA" else sdpa
         else:
-            self.sdpa = create_default_sdpa()
+            if sdpa is not None:
+                self.sdpa = sdpa
+            else:
+                self.sdpa = create_default_sdpa()
 
         if scale_heads:
             self.head_scale_weight = Parameter(

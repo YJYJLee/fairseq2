@@ -20,6 +20,9 @@ from fairseq2.nn.transformer.attention_mask import AttentionMask, CausalAttentio
 from fairseq2.typing import finaloverride
 from fairseq2.utils.version import is_pt2_or_greater
 
+import os
+disable_sdpa = os.environ.get('DISABLE_SDPA', False)
+
 logger = logging.getLogger(__name__)
 
 
@@ -105,6 +108,8 @@ class TorchSDPA(SDPA):
         attn_mask: Optional[AttentionMask] = None,
         needs_weights: bool = False,
     ) -> Tuple[Tensor, Optional[Tensor]]:
+        if disable_sdpa:
+            assert False
         if not seqs.is_cuda:
             return _naive_scaled_dot_product_attention(
                 seqs,
@@ -287,6 +292,8 @@ class SDPAFactory(Protocol):
 
 
 def _get_fallback_sdpa_factory() -> SDPAFactory:
+    if disable_sdpa:
+        return NaiveSDPA
     if is_pt2_or_greater():
         return TorchSDPA
     else:
