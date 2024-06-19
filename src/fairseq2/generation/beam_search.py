@@ -253,16 +253,16 @@ class BeamSearchSeq2SeqGenerator(Seq2SeqGenerator):
     ) -> Seq2SeqGeneratorOutput:
         seq_len = dict()
         timer_result = dict()
-        seq_len["Encoder"] = source_seqs.shape[1]
-
+        
         # (P, S)
         torch.cuda.synchronize()
         start_time = time.time()
-        encoder_output, encoder_padding_mask, gpu_util = self.model.encode(
+        (encoder_output, encoder_padding_mask, gpu_util), src_seq_len = self.model.encode(
             source_seqs, source_padding_mask
         )
         torch.cuda.synchronize()
         timer_result["Encoder"] = (time.time()-start_time)*1000
+        seq_len["Encoder"] = src_seq_len
 
         if source_padding_mask is None:
             max_source_len = source_seqs.size(1)
@@ -567,7 +567,6 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
     
     def _prefill(self) -> None:
         prefill_len = self.min_prompt_len
-
         model_output, gpu_util = self._decode(self.seqs[:, : prefill_len - 1])
 
         self.state_bag.increment_step_nr(prefill_len - 1)
