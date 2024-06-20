@@ -21,6 +21,8 @@ from fairseq2.nn.transformer.attention import SDPA, create_default_sdpa
 from fairseq2.nn.transformer.attention_mask import AttentionMask, CustomAttentionMask
 from fairseq2.typing import DataType, Device, finaloverride
 
+import os
+disable_sdpa = os.environ.get('DISABLE_SDPA', False)
 
 @final
 class RelativePositionSDPA(SDPA):
@@ -85,10 +87,13 @@ class RelativePositionSDPA(SDPA):
             model_dim, model_dim, bias=False, device=device, dtype=dtype
         )
 
-        if inner_sdpa is not None:
-            self.inner_sdpa = inner_sdpa
-        else:
+        if disable_sdpa:
             self.inner_sdpa = create_default_sdpa()
+        else:
+            if inner_sdpa is not None:
+                self.inner_sdpa = inner_sdpa
+            else:
+                self.inner_sdpa = create_default_sdpa()
 
         self.reset_parameters()
 
