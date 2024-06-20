@@ -262,7 +262,7 @@ class BeamSearchSeq2SeqGenerator(Seq2SeqGenerator):
         )
         torch.cuda.synchronize()
         timer_result["Encoder"] = (time.time()-start_time)*1000
-        seq_len["Encoder"] = src_seq_len
+        seq_len["Encoder"] = [src_seq_len, encoder_output.shape[1], 1]
 
         if source_padding_mask is None:
             max_source_len = source_seqs.size(1)
@@ -307,11 +307,12 @@ class BeamSearchSeq2SeqGenerator(Seq2SeqGenerator):
             self.step_processors,
             self._step_hooks,
         )
-        hypotheses, gpu_util2 = op()
+        hypotheses, decoding_step, gpu_util2 = op()
         torch.cuda.synchronize()
         timer_result["Decoder"] = (time.time()-start_time)*1000
 
-        seq_len["Decoder"] = op.min_prompt_len-1
+        seq_len["Decoder"] = [op.min_prompt_len-1]
+        seq_len["Decoder"] += [np.average([h[0].seq.shape[0] for h in hypotheses]), decoding_step]
         return Seq2SeqGeneratorOutput(hypotheses, encoder_output, encoder_padding_mask), timer_result, seq_len, np.average(gpu_util+gpu_util2)
 
 
@@ -546,9 +547,11 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
         gpu_util = self._prepare_state()
         gpu_utils.append(gpu_util)
 
+        decoding_step = 0
         for self.step_nr in range(self.min_prompt_len, self.max_seq_len):
             output, gpu_util = self._step()
             gpu_utils.append(gpu_util)
+            decoding_step+=1
             if not output:
                 break
 
@@ -556,7 +559,7 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
         for hypotheses in self.output:
             hypotheses.sort(key=lambda h: h.score, reverse=True)  # type: ignore[arg-type, return-value]
 
-        return self.output, gpu_utils
+        return self.output, decoding_step, gpu_utils
 
     def _prepare_state(self) -> None:
         # Fast-forward to the first step that needs to be generated.
