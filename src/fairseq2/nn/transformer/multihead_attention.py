@@ -261,6 +261,7 @@ class StandardMultiheadAttention(MultiheadAttention):
             self.num_key_value_heads = num_key_value_heads
 
         head_dim = model_dim // num_heads
+        self.head_dim = head_dim
 
         num_query_groups = num_heads // self.num_key_value_heads
 
@@ -374,6 +375,14 @@ class StandardMultiheadAttention(MultiheadAttention):
 
         self.reset_parameters()
 
+        self.kv_cache = False
+        self.seq_len = -1
+
+        self.self_attn_mask = torch.full(
+            (1, 1, 1, 1024), False
+        ).cuda()
+
+
     def reset_parameters(self) -> None:
         """Reset the parameters and buffers of the module."""
         if self.head_scale_weight is not None:
@@ -390,6 +399,8 @@ class StandardMultiheadAttention(MultiheadAttention):
         *,
         attn_mask: Optional[AttentionMask] = None,
         state_bag: Optional[IncrementalStateBag] = None,
+        valid_seq_pos: Optional[Tensor] = None,
+        is_self_attn: Optional[bool] = False
     ) -> Tensor:
         # (N, S, M) -> (N, H, S, K_h)
         q = self._project_q(seqs, padding_mask, state_bag)
@@ -399,7 +410,9 @@ class StandardMultiheadAttention(MultiheadAttention):
             # v: (N, S_kv, M) -> (N, H_kv, S_kv, V_h)
             k, v = self._project_kv(keys, key_padding_mask, values)
         else:
-            if seqs is keys:  # Self attention
+            # if seqs is keys:  # Self attention
+            # if attn_mask is not None:
+            if is_self_attn:
                 if key_padding_mask is not None:
                     raise ValueError(
                         "`key_padding_mask` must be `None` during incremental decoding."
@@ -409,35 +422,30 @@ class StandardMultiheadAttention(MultiheadAttention):
                 # v: (N, S_step, M) -> (N, H_kv, S_step, V_h)
                 k, v = self._project_kv(keys, key_padding_mask, values, state_bag)
 
-                state = state_bag.get_state(self, AttentionState)
-                if state is None:
-                    state_factory = self.state_factory or FullAttentionState
-
-                    state = state_factory(k, v, state_bag.max_num_steps)
-
-                    state_bag.set_state(self, state)
+                if self.kv_cache == False:
+                    self.cache_k[0::5, :, valid_seq_pos] = k.detach()
+                    self.cache_v[0::5, :, valid_seq_pos] = v.detach()
+                    self.seq_len = k.shape[2]
+                    k, v = self.cache_k[0::5,:,:], self.cache_v[0::5,:,:]
+                    self.kv_cache = True
                 else:
-                    state.append(k, v)
+                    self.cache_k[0::5, :, valid_seq_pos] = k.detach()
+                    self.cache_v[0::5, :, valid_seq_pos] = v.detach()
 
-                    # k: (N, H_kv, S_kv, K_h)
-                    # v: (N, H_kv, S_kv, V_h)
-                    k, v = state.get()
+                    self.seq_len += 1
+                    k, v = self.cache_k[0::5,:,:], self.cache_v[0::5,:,:]
+
             else:
-                state = state_bag.get_state(self, AttentionState)
-                if state is None:
-                    # k: (N, S_kv, M) -> (N, H_kv, S_kv, K_h)
-                    # v: (N, S_kv, M) -> (N, H_kv, S_kv, V_h)
+                if self.kv_cache == False:
                     k, v = self._project_kv(keys, key_padding_mask, values)
-
-                    state_factory = self.state_factory or StaticAttentionState
-
-                    state = state_factory(k, v, max_seq_len=k.size(2))
-
-                    state_bag.set_state(self, state)
+                    self.cache_k[0::5,:,:] = k.detach()
+                    self.cache_v[0::5,:,:] = v.detach()
+                    self.kv_cache = True
                 else:
-                    # k: (N, H_kv, S_kv, K_h)
-                    # v: (N, H_kv, S_kv, V_h)
-                    k, v = state.get()
+                    # k, v = self.cache_k[0:1,:,:], self.cache_v[0:1,:,:]
+                    k = self.cache_k[0::5,:,:].detach()
+                    v = self.cache_v[0::5,:,:].detach()
+
 
         # With Grouped Query Attention, each key/value head is repeated.
         if (num_query_groups := self.num_heads // self.num_key_value_heads) > 1:
@@ -461,6 +469,111 @@ class StandardMultiheadAttention(MultiheadAttention):
             key_padding_mask,
             v,
             attn_mask=attn_mask,
+            # attn_mask=self.self_attn_mask if is_self_attn else None,
+            needs_weights=needs_weights,
+        )
+
+        if attn_weights is not None:
+            for hook in self._attn_weight_hooks.values():
+                hook(self, attn, attn_weights)
+
+        # (N, H, S, V_h) -> (N, S, H, V_h)
+        attn = attn.transpose(1, 2)
+
+        if self.head_scale_weight is not None:
+            attn = torch.einsum("nshv,h->nshv", attn, self.head_scale_weight)
+
+        # (N, S, H, V_h) -> (N, S, V_proj)
+        attn = attn.flatten(2, 3)
+
+        # (N, S, V_proj) -> (N, S, M)
+        attn = self.output_proj(attn)
+
+        return attn[0::5,:,:]  # type: ignore[no-any-return]
+
+
+    @finaloverride
+    def forward2(
+        self,
+        seqs: Tensor,
+        padding_mask: Optional[PaddingMask],
+        keys: Tensor,
+        key_padding_mask: Optional[PaddingMask],
+        values: Tensor,
+        *,
+        attn_mask: Optional[AttentionMask] = None,
+        state_bag: Optional[IncrementalStateBag] = None,
+        valid_seq_pos: Optional[Tensor] = None,
+        is_self_attn: Optional[bool] = False
+    ) -> Tensor:
+        # (N, S, M) -> (N, H, S, K_h)
+        q = self._project_q(seqs, padding_mask, state_bag)
+
+        if self.training or state_bag is None:
+            # k: (N, S_kv, M) -> (N, H_kv, S_kv, K_h)
+            # v: (N, S_kv, M) -> (N, H_kv, S_kv, V_h)
+            k, v = self._project_kv(keys, key_padding_mask, values)
+        else:
+            # if seqs is keys:  # Self attention
+            # if attn_mask is not None:
+            if is_self_attn:
+                if key_padding_mask is not None:
+                    raise ValueError(
+                        "`key_padding_mask` must be `None` during incremental decoding."
+                    )
+
+                # k: (N, S_step, M) -> (N, H_kv, S_step, K_h)
+                # v: (N, S_step, M) -> (N, H_kv, S_step, V_h)
+                k, v = self._project_kv(keys, key_padding_mask, values, state_bag)
+
+                if self.kv_cache == False:
+                    self.cache_k[:, :, valid_seq_pos] = k.detach()
+                    self.cache_v[:, :, valid_seq_pos] = v.detach()
+                    # self.seq_len = k.shape[2]
+                    k, v = self.cache_k, self.cache_v
+                    self.kv_cache = True
+                else:
+                    self.cache_k[:, :, valid_seq_pos] = k.detach()
+                    self.cache_v[:, :, valid_seq_pos] = v.detach()
+
+                    # self.seq_len += 1
+                    k, v = self.cache_k, self.cache_v
+            else:
+                if self.kv_cache == False:
+                    k, v = self._project_kv(keys, key_padding_mask, values)
+                    self.cache_k[:,:,:] = k
+                    self.cache_v[:,:,:] = v
+                    self.kv_cache = True
+
+                else:
+                    k, v = self.cache_k, self.cache_v
+
+        # With Grouped Query Attention, each key/value head is repeated.
+        if (num_query_groups := self.num_heads // self.num_key_value_heads) > 1:
+            # (N, H_kv, S_kv, K_h) -> (N, H, S_kv, K_h)
+            k = repeat_interleave(k, dim=1, repeat=num_query_groups)
+            # (N, H_kv, S_kv, K_h) -> (N, H, S_kv, V_h)
+            v = repeat_interleave(v, dim=1, repeat=num_query_groups)
+
+        if self.attn_mask_factory is not None:
+            attn_mask = self.attn_mask_factory(
+                seqs, keys=keys, training=self.training, state_bag=state_bag
+            )
+
+        needs_weights = len(self._attn_weight_hooks) > 0
+
+        # print("Q: ", q.shape)
+        # print("K: ", k.shape)
+        # print("V: ", v.shape)
+        # attn:         (N, H, S, V_h)
+        # attn_weights: (N, H, S, S_kv)
+        attn, attn_weights = self.sdpa(
+            q,
+            k,
+            key_padding_mask,
+            v,
+            attn_mask=self.self_attn_mask if is_self_attn else None,
+            # attn_mask=attn_mask,
             needs_weights=needs_weights,
         )
 
