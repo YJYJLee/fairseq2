@@ -311,14 +311,15 @@ class BeamSearchSeq2SeqGenerator(Seq2SeqGenerator):
             self._step_hooks,
         )
         # hypotheses = op()
+        batch_size = encoder_output.shape[0]
         for layer in model.decoder.layers.drop_iter():
             if compiled_text_decoder[0] is None:
                 # 1024 is hard-coded as the maximum sequence length for self-attention layers for the optimal performance. The number could be changed accordingly.
-                layer.self_attn.cache_k = torch.zeros((self.beam_size*4, layer.self_attn.num_heads, 1024, layer.self_attn.head_dim), dtype=torch.half).cuda()
-                layer.self_attn.cache_v = torch.zeros((self.beam_size*4, layer.self_attn.num_heads, 1024, layer.self_attn.head_dim), dtype=torch.half).cuda()
+                layer.self_attn.cache_k = torch.zeros((self.beam_size*batch_size, layer.self_attn.num_heads, 1024, layer.self_attn.head_dim), dtype=torch.half).cuda()
+                layer.self_attn.cache_v = torch.zeros((self.beam_size*batch_size, layer.self_attn.num_heads, 1024, layer.self_attn.head_dim), dtype=torch.half).cuda()
                 # 256 is hard-coded as the maximum sequence length for cross-attention layers for the optimal performance. The number could be changed accordingly.
-                layer.encoder_decoder_attn.cache_k = torch.zeros((self.beam_size*4, layer.encoder_decoder_attn.num_heads, 256, layer.encoder_decoder_attn.head_dim), dtype=torch.half).cuda()
-                layer.encoder_decoder_attn.cache_v = torch.zeros((self.beam_size*4, layer.encoder_decoder_attn.num_heads, 256, layer.encoder_decoder_attn.head_dim), dtype=torch.half).cuda()
+                layer.encoder_decoder_attn.cache_k = torch.zeros((self.beam_size*batch_size, layer.encoder_decoder_attn.num_heads, 256, layer.encoder_decoder_attn.head_dim), dtype=torch.half).cuda()
+                layer.encoder_decoder_attn.cache_v = torch.zeros((self.beam_size*batch_size, layer.encoder_decoder_attn.num_heads, 256, layer.encoder_decoder_attn.head_dim), dtype=torch.half).cuda()
             layer.self_attn.kv_cache = False
             layer.encoder_decoder_attn.kv_cache = False
 
@@ -579,7 +580,6 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
             # output = self._step()
             # if not output:
             #     break
-            print("Decode start: ", self.step_nr)
             cuda_graph_mask, valid_seq_pos = self.params_for_incremental_gen(
                 prev_pos, self.step_nr, self.seqs.device)
 
@@ -591,9 +591,7 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
                 layer.self_attn.self_attn_mask.copy_(cuda_graph_mask)
 
 
-            print("Decode middle: ", self.step_nr)
             output = self._step(cuda_graph_mask, valid_seq_pos, compiled_text_decoder[0] if self.step_nr==self.min_prompt_len else compiled_text_decoder[1], model, first=self.step_nr == self.min_prompt_len)
-            print("Decode end: ", self.step_nr)
             prev_pos = self.step_nr
             if not output:
                 break
@@ -1012,7 +1010,7 @@ class _BeamSearchSeq2SeqGeneratorOp(_BeamSearchSequenceGeneratorOpBase):
 
         # 256 is hard-coded as the maximum sequence length for cross-attention layers for the optimal performance. The number could be changed accordingly.
         self.encoder_output = torch.cat((encoder_output, torch.zeros((encoder_output.shape[0], 256-encoder_output.shape[1], encoder_output.shape[2]), device=encoder_output.device, dtype=encoder_output.dtype)), 1)
-        self.encoder_padding_mask = PaddingMask(torch.tensor([encoder_output.shape[1]], device=encoder_output.device), batch_seq_len=256)
+        self.encoder_padding_mask = PaddingMask(torch.sum(encoder_padding_mask.materialize(), -1), batch_seq_len=256)
 
     @override
     def _decode(self, seqs: Tensor, cuda_graph_mask: Tensor, valid_seq_pos: Tensor, cuda_graph = None, model = None) -> SequenceModelOutput:
@@ -1037,7 +1035,6 @@ class _BeamSearchSeq2SeqGeneratorOp(_BeamSearchSequenceGeneratorOpBase):
 
         if self.encoder_padding_mask is not None:
             encoder_seq_lens = self.encoder_padding_mask.seq_lens
-            import pdb; pdb.set_trace()
             # (N) -> (N - F)
             encoder_seq_lens = encoder_seq_lens.index_select(dim=0, index=new_order)
 

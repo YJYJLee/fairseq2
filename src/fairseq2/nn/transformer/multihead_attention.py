@@ -400,7 +400,8 @@ class StandardMultiheadAttention(MultiheadAttention):
         attn_mask: Optional[AttentionMask] = None,
         state_bag: Optional[IncrementalStateBag] = None,
         valid_seq_pos: Optional[Tensor] = None,
-        is_self_attn: Optional[bool] = False
+        is_self_attn: Optional[bool] = False,
+        beam_size: int = -1
     ) -> Tensor:
         # (N, S, M) -> (N, H, S, K_h)
         q = self._project_q(seqs, padding_mask, state_bag)
@@ -424,27 +425,27 @@ class StandardMultiheadAttention(MultiheadAttention):
                 k, v = self._project_kv(keys, key_padding_mask, values, state_bag)
 
                 if self.kv_cache == False:
-                    self.cache_k[0::5, :, valid_seq_pos] = k.detach()
-                    self.cache_v[0::5, :, valid_seq_pos] = v.detach()
+                    self.cache_k[0::beam_size, :, valid_seq_pos] = k.detach()
+                    self.cache_v[0::beam_size, :, valid_seq_pos] = v.detach()
                     self.seq_len = k.shape[2]
-                    k, v = self.cache_k[0::5,:,:], self.cache_v[0::5,:,:]
+                    k, v = self.cache_k[0::beam_size,:,:], self.cache_v[0::beam_size,:,:]
                     # k, v = self.cache_k, self.cache_v
                     self.kv_cache = True
                 else:
-                    self.cache_k[0::5, :, valid_seq_pos] = k.detach()
-                    self.cache_v[0::5, :, valid_seq_pos] = v.detach()
+                    self.cache_k[0::beam_size, :, valid_seq_pos] = k.detach()
+                    self.cache_v[0::beam_size, :, valid_seq_pos] = v.detach()
 
                     self.seq_len += 1
-                    k, v = self.cache_k[0::5,:,:], self.cache_v[0::5,:,:]
+                    k, v = self.cache_k[0::beam_size,:,:], self.cache_v[0::5,:,:]
                     # k, v = self.cache_k, self.cache_v
             else:
                 if self.kv_cache == False:
                     k, v = self._project_kv(keys, key_padding_mask, values)
-                    self.cache_k[0::5,:,:] = k.detach()
-                    self.cache_v[0::5,:,:] = v.detach()
+                    self.cache_k[0::beam_size,:,:] = k.detach()
+                    self.cache_v[0::beam_size,:,:] = v.detach()
                     self.kv_cache = True
                 else:
-                    k, v = self.cache_k[0::5,:,:], self.cache_v[0::5,:,:]
+                    k, v = self.cache_k[0::beam_size,:,:], self.cache_v[0::beam_size,:,:]
                     # k, v = self.cache_k, self.cache_v
 
         # With Grouped Query Attention, each key/value head is repeated.
@@ -464,7 +465,7 @@ class StandardMultiheadAttention(MultiheadAttention):
         # attn:         (N, H, S, V_h)
         # attn_weights: (N, H, S, S_kv)
         attn, attn_weights = self.sdpa(
-            q if q.shape[0]==k.shape[0] else q.repeat(5,1,1,1),
+            q,
             k,
             key_padding_mask,
             v,
@@ -504,7 +505,8 @@ class StandardMultiheadAttention(MultiheadAttention):
         attn_mask: Optional[AttentionMask] = None,
         state_bag: Optional[IncrementalStateBag] = None,
         valid_seq_pos: Optional[Tensor] = None,
-        is_self_attn: Optional[bool] = False
+        is_self_attn: Optional[bool] = False,
+        beam_size: int = -1
     ) -> Tensor:
         # (N, S, M) -> (N, H, S, K_h)
         q = self._project_q(seqs, padding_mask, state_bag)
@@ -547,8 +549,6 @@ class StandardMultiheadAttention(MultiheadAttention):
 
                 else:
                     k, v = self.cache_k, self.cache_v
-
-        print("forward2: ", k.shape)
 
         # With Grouped Query Attention, each key/value head is repeated.
         if (num_query_groups := self.num_heads // self.num_key_value_heads) > 1:

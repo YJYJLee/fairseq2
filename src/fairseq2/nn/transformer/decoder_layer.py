@@ -229,13 +229,13 @@ class StandardTransformerDecoderLayer(TransformerDecoderLayer):
         *,
         state_bag: Optional[IncrementalStateBag] = None,
         valid_seq_pos: Optional[Tensor] = None,
+        beam_size: int = -1
     ) -> Tuple[Tensor, Optional[PaddingMask]]:
-        seqs = self._forward_self_attn(seqs, padding_mask, self_attn_mask, state_bag, valid_seq_pos)
-        print("self attn: ", seqs.shape)
+        seqs = self._forward_self_attn(seqs, padding_mask, self_attn_mask, state_bag, valid_seq_pos, beam_size=beam_size)
+
         seqs = self._forward_encoder_decoder_attn(
-            seqs, padding_mask, encoder_output, encoder_padding_mask, state_bag
+            seqs, padding_mask, encoder_output, encoder_padding_mask, state_bag, beam_size=beam_size
         )
-        print("encoderdecoder attn: ", seqs.shape)
 
         seqs = self._forward_ffn(seqs)
 
@@ -248,6 +248,7 @@ class StandardTransformerDecoderLayer(TransformerDecoderLayer):
         self_attn_mask: Optional[AttentionMask],
         state_bag: Optional[IncrementalStateBag],
         valid_seq_pos: Optional[Tensor] = None,
+        beam_size: int = -1
     ) -> Tensor:
         residual = seqs
 
@@ -263,7 +264,8 @@ class StandardTransformerDecoderLayer(TransformerDecoderLayer):
             attn_mask=self_attn_mask,
             state_bag=state_bag,
             valid_seq_pos=valid_seq_pos,
-            is_self_attn=True
+            is_self_attn=True,
+            beam_size=beam_size
         )
 
         if self.self_attn_norm is not None:
@@ -272,7 +274,8 @@ class StandardTransformerDecoderLayer(TransformerDecoderLayer):
         if self.self_attn_dropout is not None:
             seqs = self.self_attn_dropout(seqs)
 
-        seqs = seqs + (residual if seqs.shape==residual.shape else residual.repeat(5, 1, 1))
+        # seqs = seqs + (residual if seqs.shape==residual.shape else residual.repeat(5, 1, 1))
+        seqs = seqs + residual
 
         if self.norm_order == TransformerNormOrder.POST:
             seqs = self.self_attn_layer_norm(seqs)
@@ -286,6 +289,7 @@ class StandardTransformerDecoderLayer(TransformerDecoderLayer):
         encoder_output: Optional[Tensor],
         encoder_padding_mask: Optional[PaddingMask],
         state_bag: Optional[IncrementalStateBag],
+        beam_size: int = -1
     ) -> Tensor:
         if self.encoder_decoder_attn is None:
             if encoder_output is not None:
@@ -312,6 +316,7 @@ class StandardTransformerDecoderLayer(TransformerDecoderLayer):
             key_padding_mask=encoder_padding_mask,
             values=encoder_output,
             state_bag=state_bag,
+            beam_size=beam_size
         )
 
         if self.encoder_decoder_attn_dropout is not None:
@@ -357,11 +362,12 @@ class StandardTransformerDecoderLayer(TransformerDecoderLayer):
         *,
         state_bag: Optional[IncrementalStateBag] = None,
         valid_seq_pos: Optional[Tensor] = None,
+        beam_size: int = -1
     ) -> Tuple[Tensor, Optional[PaddingMask]]:
-        seqs = self._forward_self_attn2(seqs, padding_mask, self_attn_mask, state_bag, valid_seq_pos)
+        seqs = self._forward_self_attn2(seqs, padding_mask, self_attn_mask, state_bag, valid_seq_pos, beam_size=beam_size)
 
         seqs = self._forward_encoder_decoder_attn2(
-            seqs, padding_mask, encoder_output, encoder_padding_mask, state_bag
+            seqs, padding_mask, encoder_output, encoder_padding_mask, state_bag, beam_size=beam_size
         )
 
         seqs = self._forward_ffn2(seqs)
@@ -375,6 +381,7 @@ class StandardTransformerDecoderLayer(TransformerDecoderLayer):
         self_attn_mask: Optional[AttentionMask],
         state_bag: Optional[IncrementalStateBag],
         valid_seq_pos: Optional[Tensor] = None,
+        beam_size: int = -1
     ) -> Tensor:
         residual = seqs
 
@@ -390,7 +397,8 @@ class StandardTransformerDecoderLayer(TransformerDecoderLayer):
             # attn_mask=self_attn_mask,
             state_bag=state_bag,
             valid_seq_pos=valid_seq_pos,
-            is_self_attn=True
+            is_self_attn=True,
+            beam_size=beam_size
         )
 
         if self.self_attn_norm is not None:
@@ -413,6 +421,7 @@ class StandardTransformerDecoderLayer(TransformerDecoderLayer):
         encoder_output: Optional[Tensor],
         encoder_padding_mask: Optional[PaddingMask],
         state_bag: Optional[IncrementalStateBag],
+        beam_size: int = -1
     ) -> Tensor:
         if self.encoder_decoder_attn is None:
             if encoder_output is not None:
@@ -439,6 +448,7 @@ class StandardTransformerDecoderLayer(TransformerDecoderLayer):
             key_padding_mask=encoder_padding_mask,
             values=encoder_output,
             state_bag=state_bag,
+            beam_size=beam_size
         )
 
         if self.encoder_decoder_attn_dropout is not None:
