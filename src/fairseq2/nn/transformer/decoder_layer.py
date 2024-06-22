@@ -231,10 +231,11 @@ class StandardTransformerDecoderLayer(TransformerDecoderLayer):
         valid_seq_pos: Optional[Tensor] = None,
     ) -> Tuple[Tensor, Optional[PaddingMask]]:
         seqs = self._forward_self_attn(seqs, padding_mask, self_attn_mask, state_bag, valid_seq_pos)
-
+        print("self attn: ", seqs.shape)
         seqs = self._forward_encoder_decoder_attn(
             seqs, padding_mask, encoder_output, encoder_padding_mask, state_bag
         )
+        print("encoderdecoder attn: ", seqs.shape)
 
         seqs = self._forward_ffn(seqs)
 
@@ -271,7 +272,7 @@ class StandardTransformerDecoderLayer(TransformerDecoderLayer):
         if self.self_attn_dropout is not None:
             seqs = self.self_attn_dropout(seqs)
 
-        seqs = seqs + residual
+        seqs = seqs + (residual if seqs.shape==residual.shape else residual.repeat(5, 1, 1))
 
         if self.norm_order == TransformerNormOrder.POST:
             seqs = self.self_attn_layer_norm(seqs)

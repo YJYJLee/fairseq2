@@ -232,6 +232,7 @@ class StandardTransformerDecoder(TransformerDecoder):
         #     )
 
         for layer_idx, layer in enumerate(self.layers.drop_iter()):
+            print("layer_idx: ", layer_idx)
             seqs, padding_mask = layer(
                 seqs,
                 padding_mask,

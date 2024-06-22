@@ -405,6 +405,7 @@ class StandardMultiheadAttention(MultiheadAttention):
         # (N, S, M) -> (N, H, S, K_h)
         q = self._project_q(seqs, padding_mask, state_bag)
 
+        # self.original_kv_cache = self.kv_cache
         if self.training or state_bag is None:
             # k: (N, S_kv, M) -> (N, H_kv, S_kv, K_h)
             # v: (N, S_kv, M) -> (N, H_kv, S_kv, V_h)
@@ -427,6 +428,7 @@ class StandardMultiheadAttention(MultiheadAttention):
                     self.cache_v[0::5, :, valid_seq_pos] = v.detach()
                     self.seq_len = k.shape[2]
                     k, v = self.cache_k[0::5,:,:], self.cache_v[0::5,:,:]
+                    # k, v = self.cache_k, self.cache_v
                     self.kv_cache = True
                 else:
                     self.cache_k[0::5, :, valid_seq_pos] = k.detach()
@@ -434,7 +436,7 @@ class StandardMultiheadAttention(MultiheadAttention):
 
                     self.seq_len += 1
                     k, v = self.cache_k[0::5,:,:], self.cache_v[0::5,:,:]
-
+                    # k, v = self.cache_k, self.cache_v
             else:
                 if self.kv_cache == False:
                     k, v = self._project_kv(keys, key_padding_mask, values)
@@ -442,10 +444,8 @@ class StandardMultiheadAttention(MultiheadAttention):
                     self.cache_v[0::5,:,:] = v.detach()
                     self.kv_cache = True
                 else:
-                    # k, v = self.cache_k[0:1,:,:], self.cache_v[0:1,:,:]
-                    k = self.cache_k[0::5,:,:].detach()
-                    v = self.cache_v[0::5,:,:].detach()
-
+                    k, v = self.cache_k[0::5,:,:], self.cache_v[0::5,:,:]
+                    # k, v = self.cache_k, self.cache_v
 
         # With Grouped Query Attention, each key/value head is repeated.
         if (num_query_groups := self.num_heads // self.num_key_value_heads) > 1:
@@ -464,7 +464,7 @@ class StandardMultiheadAttention(MultiheadAttention):
         # attn:         (N, H, S, V_h)
         # attn_weights: (N, H, S, S_kv)
         attn, attn_weights = self.sdpa(
-            q,
+            q if q.shape[0]==k.shape[0] else q.repeat(5,1,1,1),
             k,
             key_padding_mask,
             v,
@@ -489,7 +489,7 @@ class StandardMultiheadAttention(MultiheadAttention):
         # (N, S, V_proj) -> (N, S, M)
         attn = self.output_proj(attn)
 
-        return attn[0::5,:,:]  # type: ignore[no-any-return]
+        return attn  # type: ignore[no-any-return]
 
 
     @finaloverride
@@ -547,6 +547,8 @@ class StandardMultiheadAttention(MultiheadAttention):
 
                 else:
                     k, v = self.cache_k, self.cache_v
+
+        print("forward2: ", k.shape)
 
         # With Grouped Query Attention, each key/value head is repeated.
         if (num_query_groups := self.num_heads // self.num_key_value_heads) > 1:
