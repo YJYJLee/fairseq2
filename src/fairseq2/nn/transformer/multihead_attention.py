@@ -382,7 +382,9 @@ class StandardMultiheadAttention(MultiheadAttention):
             (1, 1, 1, 1024), False
         ).cuda()
 
+        self.cache_created = False
 
+        
     def reset_parameters(self) -> None:
         """Reset the parameters and buffers of the module."""
         if self.head_scale_weight is not None:

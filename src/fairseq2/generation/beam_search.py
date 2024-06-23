@@ -313,7 +313,8 @@ class BeamSearchSeq2SeqGenerator(Seq2SeqGenerator):
         # hypotheses = op()
         batch_size = encoder_output.shape[0]
         for layer in model.decoder.layers.drop_iter():
-            if compiled_text_decoder[0] is None:
+            # if compiled_text_decoder[0] is None:
+            if layer.self_attn.cache_created == False:
                 # 1024 is hard-coded as the maximum sequence length for self-attention layers for the optimal performance. The number could be changed accordingly.
                 layer.self_attn.cache_k = torch.zeros((self.beam_size*batch_size, layer.self_attn.num_heads, 1024, layer.self_attn.head_dim), dtype=torch.half).cuda()
                 layer.self_attn.cache_v = torch.zeros((self.beam_size*batch_size, layer.self_attn.num_heads, 1024, layer.self_attn.head_dim), dtype=torch.half).cuda()
@@ -322,6 +323,7 @@ class BeamSearchSeq2SeqGenerator(Seq2SeqGenerator):
                 layer.encoder_decoder_attn.cache_v = torch.zeros((self.beam_size*batch_size, layer.encoder_decoder_attn.num_heads, 256, layer.encoder_decoder_attn.head_dim), dtype=torch.half).cuda()
             layer.self_attn.kv_cache = False
             layer.encoder_decoder_attn.kv_cache = False
+            layer.self_attn.cache_created = True
 
         hypotheses = op(compiled_text_decoder, model)
 
@@ -570,6 +572,7 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
 
     def __call__(self, compiled_text_decoder = None, model = None) -> List[List[Hypothesis]]:
         if compiled_text_decoder[0] is None:
+            assert False
             # compiled_text_decoder[0] = torch.compile(model.decoder.forward, mode='max-autotune', fullgraph=True)
             compiled_text_decoder[0] = model.decoder.forward
 
@@ -584,6 +587,7 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
                 prev_pos, self.step_nr, self.seqs.device)
 
             if compiled_text_decoder[1] is None and self.step_nr > self.min_prompt_len:
+                assert False
                 compiled_text_decoder[1] = torch.compile(model.decoder.forward2, mode='max-autotune', fullgraph=True)
                 # compiled_text_decoder[1] = model.decoder.forward2
 
@@ -1010,7 +1014,9 @@ class _BeamSearchSeq2SeqGeneratorOp(_BeamSearchSequenceGeneratorOpBase):
 
         # 256 is hard-coded as the maximum sequence length for cross-attention layers for the optimal performance. The number could be changed accordingly.
         self.encoder_output = torch.cat((encoder_output, torch.zeros((encoder_output.shape[0], 256-encoder_output.shape[1], encoder_output.shape[2]), device=encoder_output.device, dtype=encoder_output.dtype)), 1)
-        self.encoder_padding_mask = PaddingMask(torch.sum(encoder_padding_mask.materialize(), -1), batch_seq_len=256)
+        self.encoder_padding_mask = None
+        if encoder_padding_mask is not None:
+            self.encoder_padding_mask = PaddingMask(torch.sum(encoder_padding_mask.materialize(), -1), batch_seq_len=256)
 
     @override
     def _decode(self, seqs: Tensor, cuda_graph_mask: Tensor, valid_seq_pos: Tensor, cuda_graph = None, model = None) -> SequenceModelOutput:
@@ -1018,7 +1024,7 @@ class _BeamSearchSeq2SeqGeneratorOp(_BeamSearchSequenceGeneratorOpBase):
             seqs,
             None,  # We never use PAD in incremental decoding.
             self.encoder_output,
-            self.encoder_padding_mask.materialize(),
+            self.encoder_padding_mask.materialize() if self.encoder_padding_mask else None,
             state_bag=self.state_bag,
             cuda_graph_mask=cuda_graph_mask,
             valid_seq_pos=valid_seq_pos,
