@@ -34,6 +34,7 @@ from fairseq2.typing import finaloverride, override
 import numpy as np
 import time
 
+import os
 
 @final
 class BeamSearchSequenceGenerator(SequenceGenerator):
@@ -560,6 +561,9 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
         # Holds the sequences that have reached EOS.
         self.output = [[] for _ in range(num_prompts)]
 
+        self.compile = int(os.environ.get('TORCH_COMPILE', 0))
+
+
     def params_for_incremental_gen(self, prev_pos : int, cur_pos : int, device : torch.device):
         valid_seq_pos = torch.arange(prev_pos, cur_pos, device=device)
 
@@ -879,21 +883,29 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
     def _reorder_state(self, new_order: Tensor, model=None) -> None:
         # self.state_bag.reorder(new_order)
 
-        cache_ks = []
-        cache_vs = []
-        for layer in model.decoder.layers.drop_iter():
-            cache_ks.append(layer.self_attn.cache_k)
-            cache_vs.append(layer.self_attn.cache_v)
-            cache_ks.append(layer.encoder_decoder_attn.cache_k)
-            cache_vs.append(layer.encoder_decoder_attn.cache_v)
+        if self.compile:
+            cache_ks = []
+            cache_vs = []
+            for layer in model.decoder.layers.drop_iter():
+                cache_ks.append(layer.self_attn.cache_k)
+                cache_vs.append(layer.self_attn.cache_v)
+                cache_ks.append(layer.encoder_decoder_attn.cache_k)
+                cache_vs.append(layer.encoder_decoder_attn.cache_v)
 
-        @torch.compile(mode='max-autotune-no-cudagraphs')
-        def reorder(k, new_order):
-            for i in range(len(k)):
-                k[i].copy_(k[i].index_select(0, new_order))
+            @torch.compile(mode='max-autotune-no-cudagraphs')
+            def reorder(k, new_order):
+                for i in range(len(k)):
+                    k[i].copy_(k[i].index_select(0, new_order))
 
-        reorder(cache_ks, new_order)
-        reorder(cache_vs, new_order)
+            reorder(cache_ks, new_order)
+            reorder(cache_vs, new_order)
+        else:
+            for layer in model.decoder.layers.drop_iter():
+                layer.self_attn.cache_k = layer.self_attn.cache_k.index_select(0, new_order)
+                layer.self_attn.cache_v = layer.self_attn.cache_v.index_select(0, new_order)
+                layer.encoder_decoder_attn.cache_k = layer.encoder_decoder_attn.cache_k.index_select(0, new_order)
+                layer.encoder_decoder_attn.cache_v = layer.encoder_decoder_attn.cache_v.index_select(0, new_order)
+
 
         # (N) -> (N - F)
         if self.prompt_lens is not None:
