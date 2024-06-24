@@ -427,6 +427,7 @@ class StandardMultiheadAttention(MultiheadAttention):
                 k, v = self._project_kv(keys, key_padding_mask, values, state_bag)
 
                 if self.kv_cache == False:
+                    
                     self.cache_k[0::beam_size, :, valid_seq_pos] = k.detach()
                     self.cache_v[0::beam_size, :, valid_seq_pos] = v.detach()
                     self.seq_len = k.shape[2]

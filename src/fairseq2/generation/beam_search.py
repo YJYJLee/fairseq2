@@ -288,7 +288,7 @@ class BeamSearchSeq2SeqGenerator(Seq2SeqGenerator):
                 f"`min_gen_len` must be less than or equal to `max_gen_len` ({max_gen_len}), but is {self.min_gen_len} instead. Adjust your `max_gen_len` argument."
             )
 
-
+        batch_size = encoder_output.shape[0]
         torch.cuda.synchronize()
         start_time = time.time()
         op = _BeamSearchSeq2SeqGeneratorOp(
@@ -310,9 +310,10 @@ class BeamSearchSeq2SeqGenerator(Seq2SeqGenerator):
             self.len_penalty,
             self.step_processors,
             self._step_hooks,
+            self.beam_size*batch_size
         )
         # hypotheses = op()
-        batch_size = encoder_output.shape[0]
+        
         for layer in model.decoder.layers.drop_iter():
             # if compiled_text_decoder[0] is None:
             if layer.self_attn.cache_created == False:
@@ -880,7 +881,7 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
         # beam.
         return len(hypotheses) == self.beam_size
 
-    def _reorder_state(self, new_order: Tensor, model=None) -> None:
+    def _reorder_state(self, new_order: Tensor, model=None, cache_batch=-1) -> None:
         # self.state_bag.reorder(new_order)
 
         if self.compile:
@@ -901,10 +902,10 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
             reorder(cache_vs, new_order)
         else:
             for layer in model.decoder.layers.drop_iter():
-                layer.self_attn.cache_k = layer.self_attn.cache_k.index_select(0, new_order)
-                layer.self_attn.cache_v = layer.self_attn.cache_v.index_select(0, new_order)
-                layer.encoder_decoder_attn.cache_k = layer.encoder_decoder_attn.cache_k.index_select(0, new_order)
-                layer.encoder_decoder_attn.cache_v = layer.encoder_decoder_attn.cache_v.index_select(0, new_order)
+                layer.self_attn.cache_k.copy_(layer.self_attn.cache_k.index_select(0, new_order)[0].repeat(cache_batch, 1, 1, 1))
+                layer.self_attn.cache_v.copy_(layer.self_attn.cache_v.index_select(0, new_order)[0].repeat(cache_batch, 1, 1, 1))
+                layer.encoder_decoder_attn.cache_k.copy_(layer.encoder_decoder_attn.cache_k.index_select(0, new_order)[0].repeat(cache_batch, 1, 1, 1))
+                layer.encoder_decoder_attn.cache_v.copy_(layer.encoder_decoder_attn.cache_v.index_select(0, new_order)[0].repeat(cache_batch, 1, 1, 1))
 
 
         # (N) -> (N - F)
@@ -1001,6 +1002,7 @@ class _BeamSearchSeq2SeqGeneratorOp(_BeamSearchSequenceGeneratorOpBase):
         len_penalty: float,
         step_processors: Sequence[StepProcessor],
         step_hooks: Dict[int, StepHook],
+        cache_batch: int
     ) -> None:
         super().__init__(
             prompt_seqs,
@@ -1030,6 +1032,9 @@ class _BeamSearchSeq2SeqGeneratorOp(_BeamSearchSequenceGeneratorOpBase):
         if encoder_padding_mask is not None:
             self.encoder_padding_mask = PaddingMask(torch.sum(encoder_padding_mask.materialize(), -1), batch_seq_len=256)
 
+
+        self.cache_batch = cache_batch
+
     @override
     def _decode(self, seqs: Tensor, cuda_graph_mask: Tensor, valid_seq_pos: Tensor, cuda_graph = None, model = None) -> SequenceModelOutput:
         decoder_output, decoder_padding_mask = model.decode(
@@ -1046,8 +1051,8 @@ class _BeamSearchSeq2SeqGeneratorOp(_BeamSearchSequenceGeneratorOpBase):
         return model.project(decoder_output, decoder_padding_mask)
 
     @override
-    def _reorder_state(self, new_order: Tensor, model=None) -> None:
-        super()._reorder_state(new_order, model=model)
+    def _reorder_state(self, new_order: Tensor, model=None, cache_batch=-1) -> None:
+        super()._reorder_state(new_order, model=model, cache_batch=self.cache_batch)
 
         self.encoder_output = self.encoder_output.index_select(dim=0, index=new_order)
 
