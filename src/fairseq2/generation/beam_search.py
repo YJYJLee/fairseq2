@@ -748,7 +748,7 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
         # (N_new)
         next_step = BeamStep.merge(beam_next_step_list)
 
-        self._reorder_state(next_step.seq_indices, model)
+        self._reorder_state(next_step.seq_indices, model, first=first)
 
         # Record the current step.
         self.seqs[:, self.step_nr] = next_step.vocab_indices
@@ -881,10 +881,10 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
         # beam.
         return len(hypotheses) == self.beam_size
 
-    def _reorder_state(self, new_order: Tensor, model=None, cache_batch=-1) -> None:
+    def _reorder_state(self, new_order: Tensor, model=None, cache_batch=-1, first=False) -> None:
         # self.state_bag.reorder(new_order)
 
-        if self.compile:
+        if self.compile and not first:
             cache_ks = []
             cache_vs = []
             for layer in model.decoder.layers.drop_iter():
@@ -906,6 +906,14 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
                 layer.self_attn.cache_v.copy_(layer.self_attn.cache_v.index_select(0, new_order)[0].repeat(cache_batch, 1, 1, 1))
                 layer.encoder_decoder_attn.cache_k.copy_(layer.encoder_decoder_attn.cache_k.index_select(0, new_order)[0].repeat(cache_batch, 1, 1, 1))
                 layer.encoder_decoder_attn.cache_v.copy_(layer.encoder_decoder_attn.cache_v.index_select(0, new_order)[0].repeat(cache_batch, 1, 1, 1))
+
+        # for layer in model.decoder.layers.drop_iter():
+        #     layer.self_attn.cache_k.copy_(layer.self_attn.cache_k.index_select(0, new_order)[0].repeat(cache_batch, 1, 1, 1))
+        #     layer.self_attn.cache_v.copy_(layer.self_attn.cache_v.index_select(0, new_order)[0].repeat(cache_batch, 1, 1, 1))
+        #     layer.encoder_decoder_attn.cache_k.copy_(layer.encoder_decoder_attn.cache_k.index_select(0, new_order)[0].repeat(cache_batch, 1, 1, 1))
+        #     layer.encoder_decoder_attn.cache_v.copy_(layer.encoder_decoder_attn.cache_v.index_select(0, new_order)[0].repeat(cache_batch, 1, 1, 1))
+
+
 
 
         # (N) -> (N - F)
@@ -1051,8 +1059,8 @@ class _BeamSearchSeq2SeqGeneratorOp(_BeamSearchSequenceGeneratorOpBase):
         return model.project(decoder_output, decoder_padding_mask)
 
     @override
-    def _reorder_state(self, new_order: Tensor, model=None, cache_batch=-1) -> None:
-        super()._reorder_state(new_order, model=model, cache_batch=self.cache_batch)
+    def _reorder_state(self, new_order: Tensor, model=None, cache_batch=-1, first=False) -> None:
+        super()._reorder_state(new_order, model=model, cache_batch=self.cache_batch, first=first)
 
         self.encoder_output = self.encoder_output.index_select(dim=0, index=new_order)
 
