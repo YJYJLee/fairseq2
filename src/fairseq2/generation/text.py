@@ -152,7 +152,6 @@ class SequenceToTextConverter(SequenceToTextConverterBase):
             raise ValueError(
                 "`source_seqs` must contain at least one element, but is empty instead."
             )
-
         return self._do_convert(source_seqs, source_padding_mask, compiled_text_decoder=compiled_text_decoder, s2t_model_list=s2t_model_list)
 
 

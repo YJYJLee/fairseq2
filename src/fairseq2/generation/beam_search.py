@@ -257,7 +257,6 @@ class BeamSearchSeq2SeqGenerator(Seq2SeqGenerator):
         seq_len = dict()
         timer_result = dict()
         seq_len["Encoder"] = source_seqs.shape[1]
-
         # (P, S)
         torch.cuda.synchronize()
         start_time = time.time()
@@ -287,7 +286,6 @@ class BeamSearchSeq2SeqGenerator(Seq2SeqGenerator):
             raise ValueError(
                 f"`min_gen_len` must be less than or equal to `max_gen_len` ({max_gen_len}), but is {self.min_gen_len} instead. Adjust your `max_gen_len` argument."
             )
-
         batch_size = encoder_output.shape[0]
         torch.cuda.synchronize()
         start_time = time.time()
@@ -562,7 +560,7 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
         # Holds the sequences that have reached EOS.
         self.output = [[] for _ in range(num_prompts)]
 
-        self.compile = int(os.environ.get('TORCH_COMPILE', 0))
+        self.compile = os.environ.get('TORCH_COMPILE', False)
 
 
     def params_for_incremental_gen(self, prev_pos : int, cur_pos : int, device : torch.device):
