@@ -50,7 +50,7 @@ setup(
         "packaging~=23.1",
         "pyyaml~=6.0",
         "sacrebleu~=2.3",
-        "torch>=2.3.1",
+        "torch>=2.2.2",
         "torchaudio>=2.3.1",
         "torcheval~=0.0.6",
         "tqdm~=4.62",
