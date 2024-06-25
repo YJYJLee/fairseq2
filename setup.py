@@ -51,7 +51,7 @@ setup(
         "pyyaml~=6.0",
         "sacrebleu~=2.3",
         "torch>=2.2.2",
-        "torchaudio>=2.3.1",
+        "torchaudio>=2.2.2",
         "torcheval~=0.0.6",
         "tqdm~=4.62",
         "typing_extensions~=4.3;python_version<'3.10'",
