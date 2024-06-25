@@ -168,6 +168,7 @@ setup(
         # PyTorch has no ABI compatibility between releases; this means we have
         # to ensure that we depend on the exact same version that we used to
         # build our extension module.
-        "torch==" + version.parse(torch.__version__).public,
+        # "torch==" + version.parse(torch.__version__).public,
+        "torch>=2.3.1",
     ],
 )
