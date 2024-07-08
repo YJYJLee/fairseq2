@@ -52,24 +52,24 @@ class ModuleList(ModuleListBase):
         """
         super().__init__(modules)
 
-        self.drop_p = drop_p
+        self.drop_p = [drop_p] * len(modules)
 
     def drop_iter(self) -> Iterator[Module]:
         """Return an iterator that drops a random set of submodules."""
-        if self.drop_p > 0.0 and self.training:
+        if any(drop_p > 0.0 for drop_p in self.drop_p) and self.training:
             prob_dist = torch.rand(len(self), device="cpu", dtype=torch.float32)
         else:
             prob_dist = None
 
         for idx, m in enumerate(super().__iter__()):
-            if prob_dist is None or prob_dist[idx] > self.drop_p:
+            if prob_dist is None or prob_dist[idx] > self.drop_p[idx]:
                 yield m
 
     def extra_repr(self) -> str:
         """:meta private:"""
         s = super().extra_repr()
 
-        if self.drop_p > 0.0:
+        if any(drop_p > 0.0 for drop_p in self.drop_p):
             s = f"{s}, drop_p={self.drop_p}"
 
         return s
