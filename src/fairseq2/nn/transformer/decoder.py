@@ -239,10 +239,15 @@ class StandardTransformerDecoder(TransformerDecoder):
                 state_bag=state_bag,
             )
             gpu_util.append(torch.cuda.utilization(torch.cuda.current_device()))
-            
+
+            early_exit = False
             for hook in self._layer_output_hooks.values():
                 if not hook(layer_idx, seqs, padding_mask, num_layers):
+                    early_exit = True
                     break
+
+            if early_exit:
+                break
 
         if self.layer_norm is not None:
             seqs = self.layer_norm(seqs)
