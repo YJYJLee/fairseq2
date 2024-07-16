@@ -37,34 +37,19 @@ class LossScaleType(str, Enum):
     SQRT_L = "sqrt_l"
     INV_SQRT_L = "inv_sqrt_l"
 
-def early_exit_loss(model, hidden_states_dict, labels, loss_fn, e_scale: float=1.0, loss_scale_type=LossScaleType.SUM_L):
-    batch_loss_fn = copy.deepcopy(loss_fn)
-    batch_loss_fn.reduction = "none"
-
-    e = len(hidden_states_dict)
-    # List of e tensors with shape [b, s, d]
+def early_exit_loss(model, hidden_states_dict, batch, loss_fn, e_scale: float=1.0, loss_scale_type=LossScaleType.SUM_L):
     hidden_states = tuple(hidden_states_dict.values())
     hidden_layer_ids = tuple(hidden_states_dict.keys())
-    # Shape: [e, b, s, d]
-    hidden_states_stacked = torch.stack(hidden_states)
-    # Shape: [e, b, s, out_dim]
-    logits_early = model.output(model.norm(hidden_states_stacked))
-    logits_early = logits_early[..., :-1, :].contiguous()
-    # Shape: [e*b, s, out_dim]
-    logits_early = logits_early.flatten(0, 1)
-    logits_early = logits_early.transpose(1, 2)
-    # Shape: [e, b*s]
-    labels_repeated = labels.repeat(e, 1)
-    # Compute early losses: Shape: [e*b, s]
-    losses_early = batch_loss_fn(logits_early, labels_repeated)
-    # Shape: [e, b*s]
-    losses_early = losses_early.view(e, -1)
-    # Shape: [e]
-    s_unpadded = (labels != loss_fn.ignore_index).sum()
-    losses_early = losses_early.float().sum(-1) / s_unpadded
-    # Shape: [e]
-    # losses_scales = 0.1 * torch.Tensor(hidden_layer_ids).to(losses_early) / len(model.layers)
-    losses_scales = layer_ids_to_loss_scales(torch.Tensor(hidden_layer_ids).to(losses_early), len(model.layers), loss_scale_type, e_scale)
+
+    losses_early = []
+    for hidden_state in hidden_states:
+        logits_early = model.module.model.final_proj(model.module.model.text_decoder.layer_norm(hidden_state))
+        # FIXME: assuming that the other output is None, which is not always the case
+        loss_early = loss_fn(batch, *(logits_early, None))
+        losses_early.append(loss_early)  
+
+    losses_early = torch.stack(losses_early, dim=0)
+    losses_scales = layer_ids_to_loss_scales(torch.Tensor(hidden_layer_ids).to(losses_early), len(model.module.model.text_decoder.layers), loss_scale_type, e_scale)
 
     return torch.sum(losses_scales * losses_early)
 
