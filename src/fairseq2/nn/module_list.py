@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Iterable, Iterator, Optional, final
+from typing import Iterable, Iterator, List, Optional, Union, final
 
 import torch
 from torch.nn import Module
@@ -39,10 +39,10 @@ class ModuleList(ModuleListBase):
     ...    x = layer(x)
     """
 
-    drop_p: float
+    _drop_p: List[float]
 
     def __init__(
-        self, modules: Optional[Iterable[Module]] = None, *, drop_p: float = 0.0
+        self, modules: Optional[Iterable[Module]] = None, *, drop_p: Union[float, Iterable[float]] = 0.0
     ) -> None:
         """
         :param modules:
@@ -56,20 +56,36 @@ class ModuleList(ModuleListBase):
 
     def drop_iter(self) -> Iterator[Module]:
         """Return an iterator that drops a random set of submodules."""
-        if self.drop_p > 0.0 and self.training:
+        if any(drop_p > 0.0 for drop_p in self.drop_p) and self.training:
             prob_dist = torch.rand(len(self), device="cpu", dtype=torch.float32)
         else:
             prob_dist = None
 
         for idx, m in enumerate(super().__iter__()):
-            if prob_dist is None or prob_dist[idx] > self.drop_p:
+            if prob_dist is None or prob_dist[idx] > self.drop_p[idx]:
                 yield m
 
     def extra_repr(self) -> str:
         """:meta private:"""
         s = super().extra_repr()
 
-        if self.drop_p > 0.0:
+        if any(drop_p > 0.0 for drop_p in self.drop_p):
             s = f"{s}, drop_p={self.drop_p}"
 
         return s
+
+    @property
+    def drop_p(self):
+        """Get probability of dropping each layer."""
+        return self._drop_p
+
+    @drop_p.setter
+    def drop_p(self, drop_p: Union[float, Iterable[float]]):
+        """Set probability of dropping layers using either a single value or a list of values."""
+        if isinstance(drop_p, Iterable):
+            assert len(drop_p) == len(self)
+            self._drop_p = drop_p
+        elif isinstance(drop_p, float):
+            self._drop_p = [drop_p] * len(self)
+        else:
+            raise ValueError(f"Unsupported type for drop rate {drop_p}. Expecting either float or list of floats.")
