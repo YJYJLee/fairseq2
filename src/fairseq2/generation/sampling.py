@@ -8,10 +8,12 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Sequence, Tuple, Union, final
+import time
 
 import torch
 from torch import Tensor
 from torch.nn.functional import softmax
+import numpy as np
 
 from fairseq2.data import VocabularyInfo
 from fairseq2.generation.generator import (
@@ -259,10 +261,18 @@ class SamplingSeq2SeqGenerator(Seq2SeqGenerator):
         prompt_seqs: Tensor,
         prompt_padding_mask: Optional[PaddingMask],
     ) -> Seq2SeqGeneratorOutput:
+        seq_len = dict()
+        timer_result = dict()
+
         # (P, S)
-        encoder_output, encoder_padding_mask = self.model.encode(
+        torch.cuda.synchronize()
+        start_time = time.time()
+        (encoder_output, encoder_padding_mask, gpu_util), src_seq_len = self.model.encode(
             source_seqs, source_padding_mask
         )
+        torch.cuda.synchronize()
+        timer_result["Encoder"] = (time.time()-start_time)*1000
+        seq_len["Encoder"] = [src_seq_len, encoder_output.shape[1], 1]
 
         if source_padding_mask is None:
             max_source_len = source_seqs.size(1)
@@ -285,6 +295,8 @@ class SamplingSeq2SeqGenerator(Seq2SeqGenerator):
                 f"`min_gen_len` must be less than or equal to `max_gen_len` ({max_gen_len}), but is {self.min_gen_len} instead. Adjust your `max_gen_len` argument."
             )
 
+        torch.cuda.synchronize()
+        start_time = time.time()
         op = _SamplingSeq2SeqGeneratorOp(
             self.model,
             encoder_output,
@@ -306,9 +318,13 @@ class SamplingSeq2SeqGenerator(Seq2SeqGenerator):
             self._step_hooks,
         )
 
-        hypotheses = op()
+        hypotheses, decoding_step, gpu_util2 = op()
+        torch.cuda.synchronize()
+        timer_result["Decoder"] = (time.time()-start_time)*1000
 
-        return Seq2SeqGeneratorOutput(hypotheses, encoder_output, encoder_padding_mask)
+        seq_len["Decoder"] = [op.min_prompt_len-1]
+        seq_len["Decoder"] += [np.average([h[0].seq.shape[0] for h in hypotheses]), decoding_step]
+        return Seq2SeqGeneratorOutput(hypotheses, encoder_output, encoder_padding_mask), timer_result, seq_len, np.average(gpu_util+gpu_util2)
 
 
 class Sampler(ABC):
@@ -543,23 +559,31 @@ class _SamplingSequenceGeneratorOpBase(ABC):
         self.output = [[] for _ in range(num_prompts)]
 
     def __call__(self) -> List[List[Hypothesis]]:
-        self._prepare_state()
+        gpu_utils = []
+        gpu_util = self._prepare_state()
+        gpu_utils.append(gpu_util)
 
+        decoding_step = 0
         for self.step_nr in range(self.min_prompt_len, self.max_seq_len):
-            if not self._step():
+            output, gpu_util = self._step()
+            gpu_utils.append(gpu_util)
+            decoding_step+=1
+            if not output:
                 break
 
+        # breakpoint()
         if self.compute_scores:
             # Sort the hypotheses by their scores before returning.
             for hypotheses in self.output:
                 hypotheses.sort(key=lambda h: h.score, reverse=True)  # type: ignore[arg-type, return-value]
 
-        return self.output
+        return self.output, decoding_step, gpu_utils
 
     def _prepare_state(self) -> None:
         # Fast-forward to the first step that needs to be generated.
+        gpu_util = []
         if self.min_prompt_len > 1:
-            self._prefill()
+            gpu_util = self._prefill()
 
         # Fan out the state to `num_prompts` x `num_gens`.
         if self.num_gens > 1:
@@ -573,10 +597,12 @@ class _SamplingSequenceGeneratorOpBase(ABC):
 
             self._reorder_state(fan_out)
 
+        return gpu_util
+
     def _prefill(self) -> None:
         prefill_len = self.min_prompt_len
 
-        model_output = self._decode(self.seqs[:, : prefill_len - 1])
+        model_output, gpu_util = self._decode(self.seqs[:, : prefill_len - 1])
 
         self.state_bag.increment_step_nr(prefill_len - 1)
 
@@ -610,9 +636,11 @@ class _SamplingSequenceGeneratorOpBase(ABC):
             for hook in self.step_hooks.values():
                 hook(self.prompt_indices, seqs, step_scores, prefill=True)
 
+        return gpu_util
+
     def _step(self) -> bool:
         # Generate the next step output.
-        model_output = self._decode(self.seqs[:, self.step_nr - 1 : self.step_nr])
+        model_output, gpu_util = self._decode(self.seqs[:, self.step_nr - 1 : self.step_nr])
 
         self.state_bag.increment_step_nr()
 
@@ -713,13 +741,13 @@ class _SamplingSequenceGeneratorOpBase(ABC):
 
             # No sequence left, we can return.
             if len(active_seq_indices) == 0:
-                return False
+                return False, gpu_util
 
             # Otherwise, remove the sequences that have reached EOS from the
             # state and continue generating the remaining ones.
             self._reorder_state(active_seq_indices)
 
-        return True
+        return True, gpu_util
 
     @abstractmethod
     def _decode(self, seqs: Tensor) -> SequenceModelOutput:
@@ -894,7 +922,7 @@ class _SamplingSeq2SeqGeneratorOp(_SamplingSequenceGeneratorOpBase):
 
     @override
     def _decode(self, seqs: Tensor) -> SequenceModelOutput:
-        decoder_output, decoder_padding_mask = self.model.decode(
+        decoder_output, decoder_padding_mask, gpu_util = self.model.decode(
             seqs,
             None,  # We never use PAD in incremental decoding.
             self.encoder_output,
@@ -902,7 +930,7 @@ class _SamplingSeq2SeqGeneratorOp(_SamplingSequenceGeneratorOpBase):
             state_bag=self.state_bag,
         )
 
-        return self.model.project(decoder_output, decoder_padding_mask)
+        return self.model.project(decoder_output, decoder_padding_mask), np.average(gpu_util)
 
     @override
     def _reorder_state(self, new_order: Tensor) -> None:
