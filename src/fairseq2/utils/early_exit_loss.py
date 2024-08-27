@@ -32,12 +32,14 @@ def hook(
 class LossScaleType(str, Enum):
     ONE = "one"
     L = "l"
+    L2 = "l2"
     SUM_L = "sum_l"
+    SUM_L2 = "sum_l2"
     INV_L = "inv_l"
     SQRT_L = "sqrt_l"
     INV_SQRT_L = "inv_sqrt_l"
 
-def early_exit_loss(model, hidden_states_dict, batch, loss_fn, e_scale: float=1.0, loss_scale_type=LossScaleType.SUM_L):
+def early_exit_loss(model, hidden_states_dict, batch, loss_fn, e_scale: float=20.0, loss_scale_type=LossScaleType.ONE):
     hidden_states = tuple(hidden_states_dict.values())
     hidden_layer_ids = tuple(hidden_states_dict.keys())
 
@@ -59,9 +61,14 @@ def layer_ids_to_loss_scales(layer_ids, n_layers, loss_scale_type: LossScaleType
             loss_scales = torch.ones(len(layer_ids))
         case LossScaleType.L:
             loss_scales = torch.Tensor(layer_ids+1)
+        case LossScaleType.L2:
+            loss_scales = torch.Tensor((layer_ids+1)**2)
         case LossScaleType.SUM_L:
             # TODO: should we change to sum 0:i ? Perhaps create a new scale_type
             loss_scales = torch.cumsum(layer_ids+1, dim=0)
+        case LossScaleType.SUM_L2:
+            # TODO: should we change to sum 0:i ? Perhaps create a new scale_type
+            loss_scales = torch.cumsum((layer_ids+1)**2, dim=0)
         case LossScaleType.SQRT_L:
             loss_scales = torch.sqrt(layer_ids+1)
         case LossScaleType.INV_L:
