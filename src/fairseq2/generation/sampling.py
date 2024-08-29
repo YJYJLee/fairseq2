@@ -34,7 +34,6 @@ from fairseq2.nn.padding import PaddingMask
 from fairseq2.typing import finaloverride, override
 
 
-@final
 class SamplingSequenceGenerator(SequenceGenerator):
     """Represents a sequence generator based on sampling."""
 
@@ -162,7 +161,54 @@ class SamplingSequenceGenerator(SequenceGenerator):
         return SequenceGeneratorOutput(hypotheses)
 
 
-@final
+class SpeculativeSamplingSequenceGenerator(SamplingSequenceGenerator):
+    """Represents a speculative sequence generator based on sampling."""
+
+    def __init__(
+        self,
+        model: DecoderModel,
+        model_draft: DecoderModel,
+        *args,
+        **kwargs,
+    ) -> None:
+        """
+        :param model:
+            The decoder model to use for generation.
+        :param model_draft:
+            The decoder model to use to generate draft tokens.
+        """
+        super().__init__(model, *args, **kwargs)
+        self.model_draft = model_draft
+
+    @torch.inference_mode()
+    def __call__(
+        self, prompt_seqs: Tensor, prompt_padding_mask: Optional[PaddingMask]
+    ) -> SequenceGeneratorOutput:
+        op = _SpeculativeSamplingSequenceGeneratorOp(
+            self.model,
+            self.model_draft,
+            prompt_seqs,
+            prompt_padding_mask,
+            self.sampler,
+            self.num_gens,
+            self.min_gen_len,
+            self.max_gen_len,
+            self.max_seq_len,
+            self.echo_prompt,
+            self.compute_scores,
+            self.normalize_scores,
+            self.temperature,
+            self.unk_penalty,
+            self.len_penalty,
+            self.step_processors,
+            self._step_hooks,
+        )
+
+        hypotheses = op()
+
+        return SequenceGeneratorOutput(hypotheses)
+
+
 class SamplingSeq2SeqGenerator(Seq2SeqGenerator):
     """Represents a sequence-to-sequence generator based on sampling."""
 
@@ -299,6 +345,103 @@ class SamplingSeq2SeqGenerator(Seq2SeqGenerator):
         start_time = time.time()
         op = _SamplingSeq2SeqGeneratorOp(
             self.model,
+            encoder_output,
+            encoder_padding_mask,
+            prompt_seqs,
+            prompt_padding_mask,
+            self.sampler,
+            self.num_gens,
+            self.min_gen_len,
+            max_gen_len,
+            self.max_seq_len,
+            self.echo_prompt,
+            self.compute_scores,
+            self.normalize_scores,
+            self.temperature,
+            self.unk_penalty,
+            self.len_penalty,
+            self.step_processors,
+            self._step_hooks,
+        )
+
+        hypotheses, decoding_step, gpu_util2 = op()
+        torch.cuda.synchronize()
+        timer_result["Decoder"] = (time.time()-start_time)*1000
+
+        seq_len["Decoder"] = [op.min_prompt_len-1]
+        seq_len["Decoder"] += [np.average([h[0].seq.shape[0] for h in hypotheses]), decoding_step]
+        return Seq2SeqGeneratorOutput(hypotheses, encoder_output, encoder_padding_mask), timer_result, seq_len, np.average(gpu_util+gpu_util2)
+
+
+class SpeculativeSamplingSeq2SeqGenerator(SamplingSeq2SeqGenerator):
+    """Represents a sequence-to-sequence generator based on sampling."""
+
+    model_draft: DecoderModel
+
+    def __init__(
+        self,
+        model: EncoderDecoderModel,
+        model_draft: DecoderModel,
+        *args,
+        **kwargs,
+    ) -> None:
+        """
+        :param model:
+            The encoder-decoder model to use for generation.
+        :param model_draft:
+            The decoder draft model to generate draft tokens.
+        """
+        super().__init__(model, *args, **kwargs)
+        self.model_draft = model_draft
+
+    @finaloverride
+    @torch.inference_mode()
+    def __call__(
+        self,
+        source_seqs: Tensor,
+        source_padding_mask: Optional[PaddingMask],
+        prompt_seqs: Tensor,
+        prompt_padding_mask: Optional[PaddingMask],
+    ) -> Seq2SeqGeneratorOutput:
+        seq_len = dict()
+        timer_result = dict()
+
+        # (P, S)
+        torch.cuda.synchronize()
+        start_time = time.time()
+        (encoder_output, encoder_padding_mask, gpu_util), src_seq_len = self.model.encode(
+            source_seqs, source_padding_mask
+        )
+        torch.cuda.synchronize()
+        timer_result["Encoder"] = (time.time()-start_time)*1000
+        seq_len["Encoder"] = [src_seq_len, encoder_output.shape[1], 1]
+
+        if source_padding_mask is None:
+            max_source_len = source_seqs.size(1)
+        else:
+            max_source_len = int(source_padding_mask.seq_lens.max())
+
+        a_term, b_term = self.max_gen_len
+
+        # In seq2seq generation, the maximum generation length is relative to
+        # the source sequence length.
+        max_gen_len = int(a_term * max_source_len + b_term)
+
+        if max_gen_len < 1:
+            raise ValueError(
+                f"`max_gen_len` must be greater than or equal to 1, but is {max_gen_len} instead. Adjust your `max_gen_len` argument."
+            )
+
+        if self.min_gen_len > max_gen_len:
+            raise ValueError(
+                f"`min_gen_len` must be less than or equal to `max_gen_len` ({max_gen_len}), but is {self.min_gen_len} instead. Adjust your `max_gen_len` argument."
+            )
+
+        torch.cuda.synchronize()
+        start_time = time.time()
+        op = _SpeculativeSamplingSeq2SeqGeneratorOp(
+            self.model,
+            self.model_draft,
             encoder_output,
             encoder_padding_mask,
             prompt_seqs,
@@ -571,7 +714,6 @@ class _SamplingSequenceGeneratorOpBase(ABC):
             if not output:
                 break
 
-        # breakpoint()
         if self.compute_scores:
             # Sort the hypotheses by their scores before returning.
             for hypotheses in self.output:
@@ -870,6 +1012,62 @@ class _SamplingSequenceGeneratorOp(_SamplingSequenceGeneratorOpBase):
 
         return self.model.project(decoder_output, decoder_padding_mask)
 
+class _SpeculativeSamplingSequenceGeneratorOp(_SamplingSequenceGeneratorOpBase):
+    model: DecoderModel
+    model_draft: DecoderModel
+
+    def __init__(
+        self,
+        model: DecoderModel,
+        model_draft: DecoderModel,
+        prompt_seqs: Tensor,
+        prompt_padding_mask: Optional[PaddingMask],
+        sampler: Sampler,
+        num_gens: int,
+        min_gen_len: int,
+        max_gen_len: int,
+        max_seq_len: int,
+        echo_prompt: bool,
+        compute_scores: bool,
+        normalize_scores: bool,
+        temperature: float,
+        unk_penalty: float,
+        len_penalty: float,
+        step_processors: Sequence[StepProcessor],
+        step_hooks: Dict[int, StepHook],
+    ) -> None:
+        super().__init__(
+            prompt_seqs,
+            prompt_padding_mask,
+            sampler,
+            model.vocab_info,
+            num_gens,
+            min_gen_len,
+            max_gen_len,
+            max_seq_len,
+            echo_prompt,
+            compute_scores,
+            normalize_scores,
+            temperature,
+            unk_penalty,
+            len_penalty,
+            step_processors,
+            step_hooks,
+        )
+
+        self.model = model
+        self.model_draft = model_draft
+
+    def _decode_draft(self, seqs: Tensor) -> SequenceModelOutput:
+        decoder_output, decoder_padding_mask = self.model_draft.decode(
+            seqs,
+            None,  # We never use PAD in incremental decoding.
+            state_bag=self.state_bag,
+        )
+
+        return self.model_draft.project(decoder_output, decoder_padding_mask)
+
+
 
 class _SamplingSeq2SeqGeneratorOp(_SamplingSequenceGeneratorOpBase):
     model: EncoderDecoderModel
@@ -947,3 +1145,28 @@ class _SamplingSeq2SeqGeneratorOp(_SamplingSequenceGeneratorOpBase):
             self.encoder_padding_mask = PaddingMask(
                 encoder_seq_lens, batch_seq_len=self.encoder_output.size(1)
             )
+
+class _SpeculativeSamplingSeq2SeqGeneratorOp(_SamplingSeq2SeqGeneratorOp):
+    model_draft: DecoderModel
+
+    def __init__(
+        self,
+        model: EncoderDecoderModel,
+        model_draft: DecoderModel,
+        *args,
+        **kwargs,
+    ) -> None:
+        super().__init__(model, *args, **kwargs)
+
+        self.model_draft = model_draft
+
+    def _decode_draft(self, seqs: Tensor) -> SequenceModelOutput:
+        decoder_output, decoder_padding_mask, gpu_util = self.model_draft.decode(
+            seqs,
+            None,  # We never use PAD in incremental decoding.
+            self.encoder_output,
+            self.encoder_padding_mask,
+            state_bag=self.state_bag,
+        )
+
+        return self.model_draft.project(decoder_output, decoder_padding_mask), np.average(gpu_util)
