@@ -376,12 +376,13 @@ class SamplingSeq2SeqGenerator(Seq2SeqGenerator):
 class SpeculativeSamplingSeq2SeqGenerator(SamplingSeq2SeqGenerator):
     """Represents a sequence-to-sequence generator based on sampling."""
 
-    model_draft: DecoderModel
+    model_draft: EncoderDecoderModel
 
     def __init__(
         self,
         model: EncoderDecoderModel,
-        model_draft: DecoderModel,
+        model_draft: EncoderDecoderModel,
+        k_speculate: int,
         *args,
         **kwargs,
     ) -> None:
@@ -389,10 +390,11 @@ class SpeculativeSamplingSeq2SeqGenerator(SamplingSeq2SeqGenerator):
         :param model:
             The encoder-decoder model to use for generation.
         :param model_draft:
-            The decoder draft model to generate draft tokens.
+            The encoder-decoder draft model to generate draft tokens.
         """
         super().__init__(model, *args, **kwargs)
         self.model_draft = model_draft
+        self.k_speculate = k_speculate
 
     @finaloverride
     @torch.inference_mode()
@@ -442,6 +444,7 @@ class SpeculativeSamplingSeq2SeqGenerator(SamplingSeq2SeqGenerator):
         op = _SpeculativeSamplingSeq2SeqGeneratorOp(
             self.model,
             self.model_draft,
+            self.k_speculate,
             encoder_output,
             encoder_padding_mask,
             prompt_seqs,
@@ -1058,6 +1061,26 @@ class _SpeculativeSamplingSequenceGeneratorOp(_SamplingSequenceGeneratorOpBase):
         self.model = model
         self.model_draft = model_draft
 
+    def __call__(self) -> List[List[Hypothesis]]:
+        gpu_utils = []
+        gpu_util = self._prepare_state()
+        gpu_utils.append(gpu_util)
+
+        decoding_step = 0
+        for self.step_nr in range(self.min_prompt_len, self.max_seq_len):
+            output, gpu_util = self._step()
+            gpu_utils.append(gpu_util)
+            decoding_step+=1
+            if not output:
+                break
+
+        if self.compute_scores:
+            # Sort the hypotheses by their scores before returning.
+            for hypotheses in self.output:
+                hypotheses.sort(key=lambda h: h.score, reverse=True)  # type: ignore[arg-type, return-value]
+
+        return self.output, decoding_step, gpu_utils
+
     def _decode_draft(self, seqs: Tensor) -> SequenceModelOutput:
         decoder_output, decoder_padding_mask = self.model_draft.decode(
             seqs,
@@ -1147,18 +1170,52 @@ class _SamplingSeq2SeqGeneratorOp(_SamplingSequenceGeneratorOpBase):
             )
 
 class _SpeculativeSamplingSeq2SeqGeneratorOp(_SamplingSeq2SeqGeneratorOp):
-    model_draft: DecoderModel
+    model_draft: EncoderDecoderModel
+    k_speculate: int
+    state_bag_draft: IncrementalStateBag
 
     def __init__(
         self,
         model: EncoderDecoderModel,
-        model_draft: DecoderModel,
+        model_draft: EncoderDecoderModel,
+        k_speculate: int,
+        encoder_output: Tensor,
+        encoder_padding_mask: Optional[PaddingMask],
         *args,
         **kwargs,
     ) -> None:
-        super().__init__(model, *args, **kwargs)
-
+        _SamplingSeq2SeqGeneratorOp.__init__(self, model, encoder_output, encoder_padding_mask, *args, **kwargs)
         self.model_draft = model_draft
+        self.k_speculate = k_speculate
+        self.state_bag_draft = IncrementalStateBag(self.max_seq_len)
+        self.step_nr_draft = None
+
+    def __call__(self) -> List[List[Hypothesis]]:
+        gpu_utils = []
+        gpu_util = self._prepare_state()
+        gpu_utils.append(gpu_util)
+
+        decoding_step = 0
+        self.step_nr = self.min_prompt_len
+        while self.step_nr < self.max_seq_len:
+            for self.step_nr_draft in range(self.step_nr, min(self.step_nr + self.k_speculate, self.max_seq_len)):
+                output, gpu_util = self._step_draft()
+                gpu_utils.append(gpu_util)
+                decoding_step+=1
+                if not output:
+                    break
+
+            num_draft_tokens = self.step_nr_draft - self.step_nr + 1
+            # TODO: change that
+            num_accepted_tokens = num_draft_tokens
+            self.step_nr += num_accepted_tokens
+
+        if self.compute_scores:
+            # Sort the hypotheses by their scores before returning.
+            for hypotheses in self.output:
+                hypotheses.sort(key=lambda h: h.score, reverse=True)  # type: ignore[arg-type, return-value]
+
+        return self.output, decoding_step, gpu_utils
 
     def _decode_draft(self, seqs: Tensor) -> SequenceModelOutput:
         decoder_output, decoder_padding_mask, gpu_util = self.model_draft.decode(
@@ -1166,7 +1223,120 @@ class _SpeculativeSamplingSeq2SeqGeneratorOp(_SamplingSeq2SeqGeneratorOp):
             None,  # We never use PAD in incremental decoding.
             self.encoder_output,
             self.encoder_padding_mask,
-            state_bag=self.state_bag,
+            state_bag=self.state_bag_draft,
         )
 
         return self.model_draft.project(decoder_output, decoder_padding_mask), np.average(gpu_util)
+
+    def _step_draft(self) -> bool:
+        # Generate the next step output.
+        model_output, gpu_util = self._decode_draft(self.seqs[:, self.step_nr_draft - 1 : self.step_nr_draft])
+
+        self.state_bag_draft.increment_step_nr()
+
+        logits = model_output.logits
+
+        if self.temperature != 1.0:
+            logits /= self.temperature
+
+        # (N, 1, V)
+        probs = softmax(logits, dim=-1, dtype=torch.float32)
+
+        # (N, 1, V) -> (N, V)
+        probs.squeeze_(1)
+
+        # If we are generating the last possible step, force it to be EOS
+        # regardless of its score.
+        if self.step_nr_draft == self.max_seq_len - 1:
+            batch_size = self.seqs.size(0)
+
+            # (N)
+            vocab_indices = self.seqs.new_full((batch_size,), self.eos_idx)
+        else:
+            # Process `probs` in-place if requested.
+            for processor in self.step_processors:
+                processor(self.seqs[:, : self.step_nr_draft], probs)
+
+            # Apply UNK penalty.
+            if self.unk_idx is not None:
+                probs[:, self.unk_idx] -= self.unk_penalty
+
+            # Never allow PAD.
+            if self.pad_idx is not None:
+                probs[:, self.pad_idx] = 0
+
+            # Do not allow EOS till we reach the minimum sequence length.
+            if self.step_nr_draft < self.min_seq_len - 1:
+                probs[:, self.eos_idx] = 0
+
+            # (N)
+            vocab_indices = self.sampler(probs)
+
+        # EOS mask of the current step.
+        # (N)
+        eos_mask = vocab_indices == self.eos_idx
+
+        # Ignore the generated indices for the prompt sequences.
+        if self.step_nr_draft < self.max_prompt_len:
+            assert self.prompt_mask is not None
+
+            # (N)
+            mask = self.prompt_mask[:, self.step_nr_draft]
+
+            # Override the generated indices.
+            vocab_indices[mask] = self.seqs[mask, self.step_nr_draft]
+
+            # Ignore EOS in the prompt sequences.
+            eos_mask[mask] = False
+        else:
+            self.prompt_mask = None  # Not needed anymore, release.
+
+        # Record the current step.
+        self.seqs[:, self.step_nr_draft] = vocab_indices
+
+        if self.step_scores is not None:
+            # (N, 1)
+            scores = torch.gather(probs, dim=-1, index=vocab_indices[:, None])
+
+            # Record the scores of the current step.
+            self.step_scores[:, self.step_nr_draft] = scores.squeeze(1)
+
+        if self.step_hooks:
+            seqs = self.seqs[:, : self.step_nr_draft + 1]
+
+            if self.step_scores is None:
+                step_scores = None
+            else:
+                step_scores = self.step_scores[:, : self.step_nr_draft + 1]
+
+            for hook in self.step_hooks.values():
+                hook(self.prompt_indices, seqs, step_scores, prefill=False)
+
+        # Retrieve the indices of the sequences that have reached EOS.
+        # (F, 1)
+        eos_seq_indices = eos_mask.nonzero()
+
+        # If one or more sequences have reached EOS, move them to the output and
+        # continue generating the remaining sequences.
+        if len(eos_seq_indices) > 0:
+            # Move the sequences that have reached EOS to the output.
+            for seq_idx in eos_seq_indices:
+                self._finish_sequence(int(seq_idx))
+
+            # (N)
+            active_seq_mask = ~eos_mask
+
+            # (N - F, 1) -> (N - F)
+            active_seq_indices = active_seq_mask.nonzero().squeeze(-1)
+
+            # No sequence left, we can return.
+            if len(active_seq_indices) == 0:
+                return False, gpu_util
+
+            # Otherwise, remove the sequences that have reached EOS from the
+            # state and continue generating the remaining ones.
+            ## TODO: move that on main model only?
+            self._reorder_state(active_seq_indices)
+            self.state_bag_draft.reorder(active_seq_indices)
+
+        return True, gpu_util
