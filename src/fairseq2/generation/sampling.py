@@ -1064,6 +1064,7 @@ class _SpeculativeSamplingSequenceGeneratorOp(_SamplingSequenceGeneratorOpBase):
     def __call__(self) -> List[List[Hypothesis]]:
         gpu_utils = []
         gpu_util = self._prepare_state()
+        gpu_util = self._prepare_state_draft()
         gpu_utils.append(gpu_util)
 
         decoding_step = 0
@@ -1080,6 +1081,65 @@ class _SpeculativeSamplingSequenceGeneratorOp(_SamplingSequenceGeneratorOpBase):
                 hypotheses.sort(key=lambda h: h.score, reverse=True)  # type: ignore[arg-type, return-value]
 
         return self.output, decoding_step, gpu_utils
+
+    def _prepare_state_draft(self) -> None:
+        # Fast-forward to the first step that needs to be generated.
+        gpu_util = []
+        if self.min_prompt_len > 1:
+            gpu_util = self._prefill_draft()
+
+        # Fan out the state to `num_prompts` x `num_gens`.
+        if self.num_gens > 1:
+            num_prompts = self.seqs.size(0)
+
+            # (P)
+            fan_out = torch.arange(num_prompts, device=self.seqs.device)
+
+            # (P) -> (P x G)
+            fan_out = repeat_interleave(fan_out, dim=0, repeat=self.num_gens)
+
+            self._reorder_state(fan_out)
+
+        return gpu_util
+
+    def _prefill_draft(self) -> None:
+        prefill_len = self.min_prompt_len
+
+        model_output, gpu_util = self._decode_draft(self.seqs[:, : prefill_len - 1])
+
+        self.state_bag_draft.increment_step_nr(prefill_len - 1)
+
+        if self.step_scores is not None:
+            logits = model_output.logits
+
+            if self.temperature != 1.0:
+                logits /= self.temperature
+
+            # (P, S_prm - 1, V)
+            probs = softmax(logits, dim=-1, dtype=torch.float32)
+
+            # Fetch the scores of the next prompt step.
+            # (P, S_prm - 1, 1)
+            prompt_scores = torch.gather(
+                probs, dim=-1, index=self.seqs[:, 1:prefill_len].unsqueeze(-1)
+            )
+
+            # Bootstrap the step scores.
+            # (P, S_prm - 1)
+            self.step_scores[:, 1:prefill_len] = prompt_scores.squeeze(-1)
+
+        if self.step_hooks:
+            seqs = self.seqs[:, :prefill_len]
+
+            if self.step_scores is None:
+                step_scores = None
+            else:
+                step_scores = self.step_scores[:, :prefill_len]
+
+            for hook in self.step_hooks.values():
+                hook(self.prompt_indices, seqs, step_scores, prefill=True)
+
+        return gpu_util
 
     def _decode_draft(self, seqs: Tensor) -> SequenceModelOutput:
         decoder_output, decoder_padding_mask = self.model_draft.decode(
@@ -1193,22 +1253,32 @@ class _SpeculativeSamplingSeq2SeqGeneratorOp(_SamplingSeq2SeqGeneratorOp):
     def __call__(self) -> List[List[Hypothesis]]:
         gpu_utils = []
         gpu_util = self._prepare_state()
+        gpu_util = self._prepare_state_draft()
         gpu_utils.append(gpu_util)
 
         decoding_step = 0
-        self.step_nr = self.min_prompt_len
-        while self.step_nr < self.max_seq_len:
-            for self.step_nr_draft in range(self.step_nr, min(self.step_nr + self.k_speculate, self.max_seq_len)):
-                output, gpu_util = self._step_draft()
-                gpu_utils.append(gpu_util)
-                decoding_step+=1
-                if not output:
-                    break
+        # self.step_nr = self.min_prompt_len
+        # while self.step_nr < self.max_seq_len:
+            # for self.step_nr_draft in range(self.step_nr, min(self.step_nr + self.k_speculate, self.max_seq_len)):
+            #     output, gpu_util = self._step_draft()
+            #     gpu_utils.append(gpu_util)
+            #     decoding_step+=1
+            #     if not output:
+            #         break
 
-            num_draft_tokens = self.step_nr_draft - self.step_nr + 1
-            # TODO: change that
-            num_accepted_tokens = num_draft_tokens
-            self.step_nr += num_accepted_tokens
+            # num_draft_tokens = self.step_nr_draft - self.step_nr + 1
+            # # TODO: change that
+            # num_accepted_tokens = num_draft_tokens
+            # self.step_nr += num_accepted_tokens
+
+        # for testing
+        for self.step_nr in range(self.min_prompt_len, self.max_seq_len):
+            self.step_nr_draft = self.step_nr
+            output, gpu_util = self._step_draft()
+            gpu_utils.append(gpu_util)
+            decoding_step+=1
+            if not output:
+                break
 
         if self.compute_scores:
             # Sort the hypotheses by their scores before returning.
@@ -1216,6 +1286,65 @@ class _SpeculativeSamplingSeq2SeqGeneratorOp(_SamplingSeq2SeqGeneratorOp):
                 hypotheses.sort(key=lambda h: h.score, reverse=True)  # type: ignore[arg-type, return-value]
 
         return self.output, decoding_step, gpu_utils
+
+    def _prepare_state_draft(self) -> None:
+        # Fast-forward to the first step that needs to be generated.
+        gpu_util = []
+        if self.min_prompt_len > 1:
+            gpu_util = self._prefill_draft()
+
+        # Fan out the state to `num_prompts` x `num_gens`.
+        if self.num_gens > 1:
+            num_prompts = self.seqs.size(0)
+
+            # (P)
+            fan_out = torch.arange(num_prompts, device=self.seqs.device)
+
+            # (P) -> (P x G)
+            fan_out = repeat_interleave(fan_out, dim=0, repeat=self.num_gens)
+
+            self._reorder_state(fan_out)
+
+        return gpu_util
+
+    def _prefill_draft(self) -> None:
+        prefill_len = self.min_prompt_len
+
+        model_output, gpu_util = self._decode_draft(self.seqs[:, : prefill_len - 1])
+
+        self.state_bag_draft.increment_step_nr(prefill_len - 1)
+
+        if self.step_scores is not None:
+            logits = model_output.logits
+
+            if self.temperature != 1.0:
+                logits /= self.temperature
+
+            # (P, S_prm - 1, V)
+            probs = softmax(logits, dim=-1, dtype=torch.float32)
+
+            # Fetch the scores of the next prompt step.
+            # (P, S_prm - 1, 1)
+            prompt_scores = torch.gather(
+                probs, dim=-1, index=self.seqs[:, 1:prefill_len].unsqueeze(-1)
+            )
+
+            # Bootstrap the step scores.
+            # (P, S_prm - 1)
+            self.step_scores[:, 1:prefill_len] = prompt_scores.squeeze(-1)
+
+        if self.step_hooks:
+            seqs = self.seqs[:, :prefill_len]
+
+            if self.step_scores is None:
+                step_scores = None
+            else:
+                step_scores = self.step_scores[:, :prefill_len]
+
+            for hook in self.step_hooks.values():
+                hook(self.prompt_indices, seqs, step_scores, prefill=True)
+
+        return gpu_util
 
     def _decode_draft(self, seqs: Tensor) -> SequenceModelOutput:
         decoder_output, decoder_padding_mask, gpu_util = self.model_draft.decode(
@@ -1336,7 +1465,7 @@ class _SpeculativeSamplingSeq2SeqGeneratorOp(_SamplingSeq2SeqGeneratorOp):
             # Otherwise, remove the sequences that have reached EOS from the
             # state and continue generating the remaining ones.
             ## TODO: move that on main model only?
-            self._reorder_state(active_seq_indices)
-            self.state_bag_draft.reorder(active_seq_indices)
+            # self._reorder_state(active_seq_indices)
+            # self.state_bag_draft.reorder(active_seq_indices)
 
         return True, gpu_util
