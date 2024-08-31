@@ -1259,6 +1259,7 @@ class _SpeculativeSamplingSeq2SeqGeneratorOp(_SamplingSeq2SeqGeneratorOp):
         decoding_step = 0
         self.step_nr = self.min_prompt_len
         while self.step_nr < self.max_seq_len:
+            # Run draft model to generate draft tokens
             for self.step_nr_draft in range(self.step_nr, min(self.step_nr + self.k_speculate, self.max_seq_len)):
                 output, gpu_util = self._step_draft()
                 gpu_utils.append(gpu_util)
@@ -1267,9 +1268,19 @@ class _SpeculativeSamplingSeq2SeqGeneratorOp(_SamplingSeq2SeqGeneratorOp):
                     break
 
             num_draft_tokens = self.step_nr_draft - self.step_nr + 1
-            # TODO: change that
+
+            # Run draft tokens by main model
+            # TODO: receive probabilities or tokens from main
+            self._verify_main()
+
+            # Count how many draft tokens are accepted by main model
+            # TODO: run verification rather than hard coding number of accepted tokens
             num_accepted_tokens = num_draft_tokens
             self.step_nr += num_accepted_tokens
+
+            # TODO: move post decoding processing here (e.g., self.step_scores, hooks, etc.)
+            self.state_bag.increment_step_nr(num_accepted_tokens)
+            self.state_bag_draft.increment_step_nr(- (num_draft_tokens - num_accepted_tokens))
 
         if self.compute_scores:
             # Sort the hypotheses by their scores before returning.
@@ -1295,6 +1306,32 @@ class _SpeculativeSamplingSeq2SeqGeneratorOp(_SamplingSeq2SeqGeneratorOp):
             fan_out = repeat_interleave(fan_out, dim=0, repeat=self.num_gens)
 
             self._reorder_state(fan_out)
+
+        return gpu_util
+
+    def _verify_main(self) -> None:
+        model_output, gpu_util = self._decode(self.seqs[:, self.step_nr - 1 : self.step_nr_draft])
+
+        # TODO: move to post-acceptance?
+        if self.step_scores is not None:
+            logits = model_output.logits
+
+            if self.temperature != 1.0:
+                logits /= self.temperature
+
+            # TODO: return probs regardless of self.step_scores?
+            # (P, S_prm - 1, V)
+            probs = softmax(logits, dim=-1, dtype=torch.float32)
+
+            # Fetch the scores of the next prompt step.
+            # (P, S_prm - 1, 1)
+            prompt_scores = torch.gather(
+                probs, dim=-1, index=self.seqs[:, self.step_nr+1: self.step_nr_draft+1].unsqueeze(-1)
+            )
+
+            # Bootstrap the step scores.
+            # (P, S_prm - 1)
+            self.step_scores[:, self.step_nr+1: self.step_nr_draft+1] = prompt_scores.squeeze(-1)
 
         return gpu_util
 
@@ -1414,6 +1451,7 @@ class _SpeculativeSamplingSeq2SeqGeneratorOp(_SamplingSeq2SeqGeneratorOp):
         # Record the current step.
         self.seqs[:, self.step_nr_draft] = vocab_indices
 
+        # TODO: move to apply on accepted tokens?
         if self.step_scores is not None:
             # (N, 1)
             scores = torch.gather(probs, dim=-1, index=vocab_indices[:, None])
@@ -1421,6 +1459,7 @@ class _SpeculativeSamplingSeq2SeqGeneratorOp(_SamplingSeq2SeqGeneratorOp):
             # Record the scores of the current step.
             self.step_scores[:, self.step_nr_draft] = scores.squeeze(1)
 
+        # TODO: move to apply on accepted tokens?
         if self.step_hooks:
             seqs = self.seqs[:, : self.step_nr_draft + 1]
 
@@ -1432,10 +1471,12 @@ class _SpeculativeSamplingSeq2SeqGeneratorOp(_SamplingSeq2SeqGeneratorOp):
             for hook in self.step_hooks.values():
                 hook(self.prompt_indices, seqs, step_scores, prefill=False)
 
+        # TODO: move to apply on accepted tokens?
         # Retrieve the indices of the sequences that have reached EOS.
         # (F, 1)
         eos_seq_indices = eos_mask.nonzero()
 
+        # TODO: move to apply on accepted tokens?
         # If one or more sequences have reached EOS, move them to the output and
         # continue generating the remaining sequences.
         if len(eos_seq_indices) > 0:

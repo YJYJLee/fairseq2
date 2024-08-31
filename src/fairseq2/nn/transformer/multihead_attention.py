@@ -632,11 +632,13 @@ class FullAttentionState(AttentionState):
     @finaloverride
     def append(self, k: Tensor, v: Tensor) -> None:
         pos = self.seq_len
+        assert k.shape[2] == v.shape[2]
+        append_len = k.shape[2]
 
-        self.k[:, :, pos : pos + 1] = k
-        self.v[:, :, pos : pos + 1] = v
+        self.k[:, :, pos : pos + append_len] = k
+        self.v[:, :, pos : pos + append_len] = v
 
-        self.seq_len += 1
+        self.seq_len += append_len
 
     @finaloverride
     def get(self) -> Tuple[Tensor, Tensor]:
