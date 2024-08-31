@@ -1257,28 +1257,19 @@ class _SpeculativeSamplingSeq2SeqGeneratorOp(_SamplingSeq2SeqGeneratorOp):
         gpu_utils.append(gpu_util)
 
         decoding_step = 0
-        # self.step_nr = self.min_prompt_len
-        # while self.step_nr < self.max_seq_len:
-            # for self.step_nr_draft in range(self.step_nr, min(self.step_nr + self.k_speculate, self.max_seq_len)):
-            #     output, gpu_util = self._step_draft()
-            #     gpu_utils.append(gpu_util)
-            #     decoding_step+=1
-            #     if not output:
-            #         break
+        self.step_nr = self.min_prompt_len
+        while self.step_nr < self.max_seq_len:
+            for self.step_nr_draft in range(self.step_nr, min(self.step_nr + self.k_speculate, self.max_seq_len)):
+                output, gpu_util = self._step_draft()
+                gpu_utils.append(gpu_util)
+                decoding_step+=1
+                if not output:
+                    break
 
-            # num_draft_tokens = self.step_nr_draft - self.step_nr + 1
-            # # TODO: change that
-            # num_accepted_tokens = num_draft_tokens
-            # self.step_nr += num_accepted_tokens
-
-        # for testing
-        for self.step_nr in range(self.min_prompt_len, self.max_seq_len):
-            self.step_nr_draft = self.step_nr
-            output, gpu_util = self._step_draft()
-            gpu_utils.append(gpu_util)
-            decoding_step+=1
-            if not output:
-                break
+            num_draft_tokens = self.step_nr_draft - self.step_nr + 1
+            # TODO: change that
+            num_accepted_tokens = num_draft_tokens
+            self.step_nr += num_accepted_tokens
 
         if self.compute_scores:
             # Sort the hypotheses by their scores before returning.
