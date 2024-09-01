@@ -1271,7 +1271,8 @@ class _SpeculativeSamplingSeq2SeqGeneratorOp(_SamplingSeq2SeqGeneratorOp):
 
             # Run draft tokens by main model
             # TODO: receive probabilities or tokens from main
-            self._verify_main()
+            probs, vocab_indices, gpu_util = self._verify_main()
+            gpu_utils.append(gpu_util)
 
             # Count how many draft tokens are accepted by main model
             # TODO: run verification rather than hard coding number of accepted tokens
@@ -1312,28 +1313,68 @@ class _SpeculativeSamplingSeq2SeqGeneratorOp(_SamplingSeq2SeqGeneratorOp):
     def _verify_main(self) -> None:
         model_output, gpu_util = self._decode(self.seqs[:, self.step_nr - 1 : self.step_nr_draft])
 
-        # TODO: move to post-acceptance?
-        if self.step_scores is not None:
-            logits = model_output.logits
+        logits = model_output.logits
 
-            if self.temperature != 1.0:
-                logits /= self.temperature
+        if self.temperature != 1.0:
+            logits /= self.temperature
 
-            # TODO: return probs regardless of self.step_scores?
-            # (P, S_prm - 1, V)
-            probs = softmax(logits, dim=-1, dtype=torch.float32)
+        # TODO: return probs regardless of self.step_scores?
+        # (P, S_prm - 1, V)
+        probs = softmax(logits, dim=-1, dtype=torch.float32)
 
-            # Fetch the scores of the next prompt step.
-            # (P, S_prm - 1, 1)
-            prompt_scores = torch.gather(
-                probs, dim=-1, index=self.seqs[:, self.step_nr+1: self.step_nr_draft+1].unsqueeze(-1)
-            )
+        # Fetch the scores of the next prompt step.
+        # (P, S_prm - 1, 1)
+        prompt_scores = torch.gather(
+            probs, dim=-1, index=self.seqs[:, self.step_nr+1: self.step_nr_draft+1].unsqueeze(-1)
+        )
 
-            # Bootstrap the step scores.
-            # (P, S_prm - 1)
-            self.step_scores[:, self.step_nr+1: self.step_nr_draft+1] = prompt_scores.squeeze(-1)
+        # Copied from self._draft_step()
+        # If we are generating the last possible step, force it to be EOS
+        # regardless of its score.
+        # TODO: move this to after verification?
+        # Process `probs` in-place if requested.
+        for processor in self.step_processors:
+            processor(self.seqs[:, : self.step_nr_draft], probs)
 
-        return gpu_util
+        # Apply UNK penalty.
+        if self.unk_idx is not None:
+            probs[:, self.unk_idx] -= self.unk_penalty
+
+        # Never allow PAD.
+        if self.pad_idx is not None:
+            probs[:, self.pad_idx] = 0
+
+        # Do not allow EOS till we reach the minimum sequence length.
+        if self.step_nr_draft < self.min_seq_len - 1:
+            probs[:, self.eos_idx] = 0
+
+        # (N)
+        vocab_indices = self.sampler(probs)
+
+        # EOS mask of the current step.
+        # (N)
+        eos_mask = vocab_indices == self.eos_idx
+
+        # Ignore the generated indices for the prompt sequences.
+        if self.step_nr_draft < self.max_prompt_len:
+            assert self.prompt_mask is not None
+
+            # (N)
+            mask = self.prompt_mask[:, self.step_nr_draft]
+
+            # Override the generated indices.
+            vocab_indices[mask] = self.seqs[mask, self.step_nr_draft]
+
+            # Ignore EOS in the prompt sequences.
+            eos_mask[mask] = False
+        else:
+            self.prompt_mask = None  # Not needed anymore, release.
+
+        # TODO: commenting for now. Move to accept step.
+        ## Record the current step.
+        # self.seqs[:, self.step_nr - 1 : self.step_nr_draft] = vocab_indices
+
+        return probs, vocab_indices, gpu_util
 
     def _prefill_draft(self) -> None:
         prefill_len = self.min_prompt_len
@@ -1460,9 +1501,10 @@ class _SpeculativeSamplingSeq2SeqGeneratorOp(_SamplingSeq2SeqGeneratorOp):
             # (N - F, 1) -> (N - F)
             active_seq_indices = active_seq_mask.nonzero().squeeze(-1)
 
+            # TODO: commenting for now as we will move this to post-acceptance logic
             # No sequence left, we can return.
-            if len(active_seq_indices) == 0:
-                return False, gpu_util
+            # if len(active_seq_indices) == 0:
+            #     return False, gpu_util
 
             # Otherwise, remove the sequences that have reached EOS from the
             # state and continue generating the remaining ones.
