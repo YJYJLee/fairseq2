@@ -1284,11 +1284,13 @@ class _SpeculativeSamplingSeq2SeqGeneratorOp(_SamplingSeq2SeqGeneratorOp):
             # q: target prob, p: draft prob
             # q >= p: always accept draft token
             # q < p: q/p prob to accept draft token
-            p = probs_draft[:, torch.arange(0, num_draft_tokens, device=probs_draft.device), vocab_indices_draft[:, :num_draft_tokens]]
-            # print(f"probs_main.shape: {probs_main.shape}, torch.arange(0, num_draft_tokens, device=probs_draft.device): {torch.arange(0, num_draft_tokens, device=probs_draft.device)}, vocab_indices_draft: {vocab_indices_draft[:, :num_draft_tokens]}")
-            q = probs_main[:, torch.arange(0, num_draft_tokens, device=probs_main.device), vocab_indices_draft[:, :num_draft_tokens]]
-            accept_draft_prob = torch.minimum(torch.ones(()), q[:, :, :num_draft_tokens]/ p)
-            rejected_locations = (torch.rand_like(accept_draft_prob) > accept_draft_prob).nonzero()
+            p = probs_draft[:, torch.arange(0, num_draft_tokens, device=probs_draft.device), :]
+            p = torch.gather(p, dim=2, index=vocab_indices_draft[:, :num_draft_tokens].unsqueeze(-1))
+            q = probs_main[:, torch.arange(0, num_draft_tokens, device=probs_main.device), :]
+            q = torch.gather(q, dim=2, index=vocab_indices_main[:, :num_draft_tokens].unsqueeze(-1))
+            accept_draft_prob = torch.minimum(torch.ones(()), q[:, :, :num_draft_tokens]/ p).squeeze(dim=-1)
+            is_accepted = torch.rand_like(accept_draft_prob) > accept_draft_prob
+            rejected_locations = torch.where(is_accepted == False)[1]
             num_accepted_tokens = num_draft_tokens
             self.step_nr += num_accepted_tokens
 
