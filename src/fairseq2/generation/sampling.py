@@ -1342,36 +1342,6 @@ class _SpeculativeSamplingSeq2SeqGeneratorOp(_SamplingSeq2SeqGeneratorOp):
 
         self.state_bag_draft.increment_step_nr(prefill_len - 1)
 
-        if self.step_scores is not None:
-            logits = model_output.logits
-
-            if self.temperature != 1.0:
-                logits /= self.temperature
-
-            # (P, S_prm - 1, V)
-            probs = softmax(logits, dim=-1, dtype=torch.float32)
-
-            # Fetch the scores of the next prompt step.
-            # (P, S_prm - 1, 1)
-            prompt_scores = torch.gather(
-                probs, dim=-1, index=self.seqs[:, 1:prefill_len].unsqueeze(-1)
-            )
-
-            # Bootstrap the step scores.
-            # (P, S_prm - 1)
-            self.step_scores[:, 1:prefill_len] = prompt_scores.squeeze(-1)
-
-        if self.step_hooks:
-            seqs = self.seqs[:, :prefill_len]
-
-            if self.step_scores is None:
-                step_scores = None
-            else:
-                step_scores = self.step_scores[:, :prefill_len]
-
-            for hook in self.step_hooks.values():
-                hook(self.prompt_indices, seqs, step_scores, prefill=True)
-
         return gpu_util
 
     def _decode_draft(self, seqs: Tensor) -> SequenceModelOutput:
