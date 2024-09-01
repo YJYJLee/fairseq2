@@ -1258,24 +1258,37 @@ class _SpeculativeSamplingSeq2SeqGeneratorOp(_SamplingSeq2SeqGeneratorOp):
 
         decoding_step = 0
         self.step_nr = self.min_prompt_len
+        bs = self.seqs.shape[0]
+        vocab_indices_draft = torch.zeros(bs, self.k_speculate, device=self.seqs.device, dtype=self.seqs.dtype)
+        probs_draft = torch.zeros(bs, self.k_speculate, self.model.final_proj.output_dim, device=self.seqs.device, dtype=self.encoder_output.dtype)
+        output_draft = [False] * self.k_speculate
         while self.step_nr < self.max_seq_len:
             # Run draft model to generate draft tokens
-            for self.step_nr_draft in range(self.step_nr, min(self.step_nr + self.k_speculate, self.max_seq_len)):
-                output, gpu_util = self._step_draft()
-                gpu_utils.append(gpu_util)
+            for idx_draft, self.step_nr_draft in enumerate(range(self.step_nr, min(self.step_nr + self.k_speculate, self.max_seq_len))):
+                output_draft[idx_draft], probs_draft[:, idx_draft ,:], vocab_indices_draft[:, idx_draft], gpu_util_draft = self._step_draft()
+                gpu_utils.append(gpu_util_draft)
                 decoding_step+=1
-                if not output:
-                    break
+                # TODO: Move this to post-acceptance logic
+                # if not output_draft:
+                #     break
 
             num_draft_tokens = self.step_nr_draft - self.step_nr + 1
 
             # Run draft tokens by main model
             # TODO: receive probabilities or tokens from main
-            probs, vocab_indices, gpu_util = self._verify_main()
-            gpu_utils.append(gpu_util)
+            probs_main, vocab_indices_main, gpu_util_main = self._verify_main()
+            gpu_utils.append(gpu_util_main)
 
             # Count how many draft tokens are accepted by main model
             # TODO: run verification rather than hard coding number of accepted tokens
+            # q: target prob, p: draft prob
+            # q >= p: always accept draft token
+            # q < p: q/p prob to accept draft token
+            p = probs_draft[:, torch.arange(0, num_draft_tokens, device=probs_draft.device), vocab_indices_draft[:, :num_draft_tokens]]
+            # print(f"probs_main.shape: {probs_main.shape}, torch.arange(0, num_draft_tokens, device=probs_draft.device): {torch.arange(0, num_draft_tokens, device=probs_draft.device)}, vocab_indices_draft: {vocab_indices_draft[:, :num_draft_tokens]}")
+            q = probs_main[:, torch.arange(0, num_draft_tokens, device=probs_main.device), vocab_indices_draft[:, :num_draft_tokens]]
+            accept_draft_prob = torch.minimum(torch.ones(()), q[:, :, :num_draft_tokens]/ p)
+            rejected_locations = (torch.rand_like(accept_draft_prob) > accept_draft_prob).nonzero()
             num_accepted_tokens = num_draft_tokens
             self.step_nr += num_accepted_tokens
 
@@ -1501,10 +1514,9 @@ class _SpeculativeSamplingSeq2SeqGeneratorOp(_SamplingSeq2SeqGeneratorOp):
             # (N - F, 1) -> (N - F)
             active_seq_indices = active_seq_mask.nonzero().squeeze(-1)
 
-            # TODO: commenting for now as we will move this to post-acceptance logic
             # No sequence left, we can return.
-            # if len(active_seq_indices) == 0:
-            #     return False, gpu_util
+            if len(active_seq_indices) == 0:
+                return False, probs, vocab_indices, gpu_util
 
             # Otherwise, remove the sequences that have reached EOS from the
             # state and continue generating the remaining ones.
@@ -1512,4 +1524,4 @@ class _SpeculativeSamplingSeq2SeqGeneratorOp(_SamplingSeq2SeqGeneratorOp):
             # self._reorder_state(active_seq_indices)
             # self.state_bag_draft.reorder(active_seq_indices)
 
-        return True, gpu_util
+        return True, probs, vocab_indices, gpu_util
