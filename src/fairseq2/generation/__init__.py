@@ -30,9 +30,11 @@ from fairseq2.generation.generator import StepHook as StepHook
 from fairseq2.generation.sampling import Sampler as Sampler
 from fairseq2.generation.sampling import (
     SamplingSeq2SeqGenerator as SamplingSeq2SeqGenerator,
+    SpeculativeSamplingSeq2SeqGenerator as SpeculativeSamplingSeq2SeqGenerator,
 )
 from fairseq2.generation.sampling import (
     SamplingSequenceGenerator as SamplingSequenceGenerator,
+    SpeculativeSamplingSequenceGenerator as SpeculativeSamplingSequenceGenerator,
 )
 from fairseq2.generation.sampling import TopKSampler as TopKSampler
 from fairseq2.generation.sampling import TopPSampler as TopPSampler

@@ -215,7 +215,7 @@ class StandardTransformerDecoder(TransformerDecoder):
         *,
         state_bag: Optional[IncrementalStateBag] = None,
     ) -> Tuple[Tensor, Optional[PaddingMask]]:
-        if self._layer_output_hooks and self.layers.drop_p > 0.0:
+        if self._layer_output_hooks and any(drop_p > 0.0 for drop_p in self.layers.drop_p):
             raise RuntimeError(
                 "The layer output hooks cannot be run when LayerDrop is enabled."
             )
@@ -239,10 +239,15 @@ class StandardTransformerDecoder(TransformerDecoder):
                 state_bag=state_bag,
             )
             gpu_util.append(torch.cuda.utilization(torch.cuda.current_device()))
-            
+
+            early_exit = False
             for hook in self._layer_output_hooks.values():
                 if not hook(layer_idx, seqs, padding_mask, num_layers):
+                    early_exit = True
                     break
+
+            if early_exit:
+                break
 
         if self.layer_norm is not None:
             seqs = self.layer_norm(seqs)
