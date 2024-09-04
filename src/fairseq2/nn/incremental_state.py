@@ -74,6 +74,11 @@ class IncrementalStateBag:
 
         self.step_nr = step_nr
 
+        # Update seq_len of attention modules
+        for module in self._module_states.values():
+            if hasattr(module, "seq_len"):
+                module.seq_len = step_nr
+
     def get_state(self, m: Module, kls: Type[T]) -> Optional[T]:
         """Get the state of ``m`` if present in the bag.
 

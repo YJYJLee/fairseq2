@@ -1290,13 +1290,32 @@ class _SpeculativeSamplingSeq2SeqGeneratorOp(_SamplingSeq2SeqGeneratorOp):
             q = torch.gather(q, dim=2, index=vocab_indices_main[:, :num_draft_tokens].unsqueeze(-1))
             accept_draft_prob = torch.minimum(torch.ones(()), q[:, :, :num_draft_tokens]/ p).squeeze(dim=-1)
             is_accepted = torch.rand_like(accept_draft_prob) > accept_draft_prob
-            rejected_locations = torch.where(is_accepted == False)[1]
-            num_accepted_tokens = num_draft_tokens
-            self.step_nr += num_accepted_tokens
+
+            rejected_locations = torch.argmax((~is_accepted).int(), dim=-1)
+            no_false = torch.all(is_accepted, dim=1)
+            rejected_locations[no_false] = -1
+            min_rejected_locations = torch.min(rejected_locations)
+
+            if min_rejected_locations == -1: # All draft tokens have been accepted
+                # TODO: Remove Hack
+                min_rejected_locations = 0
+            
+            if True:
+                accept_length = min_rejected_locations
+                p = probs_draft[:, accept_length, :]
+                q = probs_main[:, accept_length, :]
+                probs_new = q - p
+                probs_new = torch.where(probs_new > 0, probs_new, 0.0)
+                probs_new = probs_new / probs_new.sum()
+                # (N)
+                vocab_indices = self.sampler(probs_new)
+                self.seqs[:, self.step_nr + accept_length] = vocab_indices
+
+            self.step_nr += accept_length+1
 
             # TODO: move post decoding processing here (e.g., self.step_scores, hooks, etc.)
-            self.state_bag.increment_step_nr(num_accepted_tokens)
-            self.state_bag_draft.increment_step_nr(- (num_draft_tokens - num_accepted_tokens))
+            self.state_bag.increment_step_nr(- (num_draft_tokens - accept_length - 1))
+            self.state_bag_draft.increment_step_nr(- (num_draft_tokens - accept_length - 1))
 
         if self.compute_scores:
             # Sort the hypotheses by their scores before returning.
@@ -1327,6 +1346,7 @@ class _SpeculativeSamplingSeq2SeqGeneratorOp(_SamplingSeq2SeqGeneratorOp):
 
     def _verify_main(self) -> None:
         model_output, gpu_util = self._decode(self.seqs[:, self.step_nr - 1 : self.step_nr_draft])
+        self.state_bag.increment_step_nr(self.step_nr_draft - (self.step_nr - 1))
 
         logits = model_output.logits
 
