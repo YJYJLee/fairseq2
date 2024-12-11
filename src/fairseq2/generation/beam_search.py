@@ -250,6 +250,7 @@ class BeamSearchSeq2SeqGenerator(Seq2SeqGenerator):
         source_padding_mask: Optional[PaddingMask],
         prompt_seqs: Tensor,
         prompt_padding_mask: Optional[PaddingMask],
+        profile: bool = False
     ) -> Seq2SeqGeneratorOutput:
         seq_len = dict()
         timer_result = dict()
@@ -259,7 +260,7 @@ class BeamSearchSeq2SeqGenerator(Seq2SeqGenerator):
         torch.cuda.synchronize()
         start_time = time.time()
         encoder_output, encoder_padding_mask = self.model.encode(
-            source_seqs, source_padding_mask
+            source_seqs, source_padding_mask, profile=profile
         )
         torch.cuda.synchronize()
         timer_result["Encoder"] = (time.time()-start_time)*1000
@@ -307,7 +308,7 @@ class BeamSearchSeq2SeqGenerator(Seq2SeqGenerator):
             self.step_processors,
             self._step_hooks,
         )
-        hypotheses = op()
+        hypotheses = op(profile=profile)
         torch.cuda.synchronize()
         timer_result["Decoder"] = (time.time()-start_time)*1000
 
@@ -541,11 +542,11 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
         # Holds the sequences that have reached EOS.
         self.output = [[] for _ in range(num_prompts)]
 
-    def __call__(self) -> List[List[Hypothesis]]:
+    def __call__(self, profile: bool = False) -> List[List[Hypothesis]]:
         self._prepare_state()
 
         for self.step_nr in range(self.min_prompt_len, self.max_seq_len):
-            output = self._step()
+            output = self._step(profile=profile and self.step_nr==self.min_prompt_len)
             if not output:
                 break
 
@@ -563,7 +564,7 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
     def _prefill(self) -> None:
         prefill_len = self.min_prompt_len
 
-        model_output = self._decode(self.seqs[:, : prefill_len - 1])
+        model_output = self._decode(self.seqs[:, : prefill_len - 1], profile=False)
 
         self.state_bag.increment_step_nr(prefill_len - 1)
 
@@ -596,9 +597,9 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
             for hook in self.step_hooks.values():
                 hook(self.prompt_indices, seqs, step_scores, prefill=True)
     
-    def _step(self) -> bool:
+    def _step(self, profile: bool = False) -> bool:
         # Generate the next step output.
-        model_output = self._decode(self.seqs[:, self.step_nr - 1 : self.step_nr])
+        model_output = self._decode(self.seqs[:, self.step_nr - 1 : self.step_nr], profile=profile)
 
         self.state_bag.increment_step_nr()
 
@@ -930,13 +931,14 @@ class _BeamSearchSeq2SeqGeneratorOp(_BeamSearchSequenceGeneratorOpBase):
         self.encoder_padding_mask = encoder_padding_mask
 
     @override
-    def _decode(self, seqs: Tensor) -> SequenceModelOutput:
+    def _decode(self, seqs: Tensor, profile: bool = False) -> SequenceModelOutput:
         decoder_output, decoder_padding_mask = self.model.decode(
             seqs,
             None,  # We never use PAD in incremental decoding.
             self.encoder_output,
             self.encoder_padding_mask,
             state_bag=self.state_bag,
+            profile=profile
         )
 
         return self.model.project(decoder_output, decoder_padding_mask)
