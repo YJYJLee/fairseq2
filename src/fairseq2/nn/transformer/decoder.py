@@ -216,7 +216,8 @@ class StandardTransformerDecoder(TransformerDecoder):
         state_bag: Optional[IncrementalStateBag] = None,
         cuda_graph_mask: Optional[Tensor] = None,
         valid_seq_pos: Optional[Tensor] = None,
-        beam_size: int = -1
+        beam_size: int = -1,
+        profile: bool = False
     ) -> Tuple[Tensor, Optional[PaddingMask]]:
         if self._layer_output_hooks and self.layers.drop_p > 0.0:
             raise RuntimeError(
@@ -265,7 +266,8 @@ class StandardTransformerDecoder(TransformerDecoder):
         state_bag: Optional[IncrementalStateBag] = None,
         cuda_graph_mask: Optional[Tensor] = None,
         valid_seq_pos: Optional[Tensor] = None,
-        beam_size: int = -1
+        beam_size: int = -1,
+        profile: bool = False,
     ) -> Tuple[Tensor, Optional[PaddingMask]]:
         if self._layer_output_hooks and self.layers.drop_p > 0.0:
             raise RuntimeError(
@@ -282,6 +284,9 @@ class StandardTransformerDecoder(TransformerDecoder):
         #     )
 
         for layer_idx, layer in enumerate(self.layers.drop_iter()):
+            if profile and layer_idx == 5:
+                torch.cuda.nvtx.range_push("hello")
+
             seqs, padding_mask = layer.forward2(
                 seqs,
                 padding_mask,
@@ -293,7 +298,9 @@ class StandardTransformerDecoder(TransformerDecoder):
                 valid_seq_pos=valid_seq_pos,
                 beam_size=beam_size
             )
-            
+            if profile and layer_idx == 5:
+                torch.cuda.nvtx.range_pop()
+
             for hook in self._layer_output_hooks.values():
                 if not hook(layer_idx, seqs, padding_mask, num_layers):
                     break

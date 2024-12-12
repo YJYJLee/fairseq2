@@ -615,7 +615,7 @@ class StandardMultiheadAttention(MultiheadAttention):
         state_bag: Optional[IncrementalStateBag] = None,
         valid_seq_pos: Optional[Tensor] = None,
         is_self_attn: Optional[bool] = False,
-        beam_size: int = -1
+        beam_size: int = -1,
     ) -> Tensor:
         # (N, S, M) -> (N, H, S, K_h)
         q = self._project_q(seqs, padding_mask, state_bag)

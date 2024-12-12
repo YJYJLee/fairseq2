@@ -252,7 +252,8 @@ class BeamSearchSeq2SeqGenerator(Seq2SeqGenerator):
         prompt_seqs: Tensor,
         prompt_padding_mask: Optional[PaddingMask],
         compiled_text_decoder: Optional[list] = None,
-        model = None
+        model = None,
+        profile: bool = False
     ) -> Seq2SeqGeneratorOutput:
         seq_len = dict()
         timer_result = dict()
@@ -325,7 +326,7 @@ class BeamSearchSeq2SeqGenerator(Seq2SeqGenerator):
             layer.encoder_decoder_attn.kv_cache = False
             layer.self_attn.cache_created = True
 
-        hypotheses = op(compiled_text_decoder, model)
+        hypotheses = op(compiled_text_decoder, model, profile=profile)
 
         torch.cuda.synchronize()
         timer_result["Decoder"] = (time.time()-start_time)*1000
@@ -573,7 +574,7 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
         mask[:, :, :, :valid_seq_pos.item() + 1] = True
         return mask, valid_seq_pos
 
-    def __call__(self, compiled_text_decoder = None, model = None) -> List[List[Hypothesis]]:
+    def __call__(self, compiled_text_decoder = None, model = None, profile: bool = False) -> List[List[Hypothesis]]:
         if compiled_text_decoder[0] is None:
             assert False
             # compiled_text_decoder[0] = torch.compile(model.decoder.forward, mode='max-autotune', fullgraph=True)
@@ -598,7 +599,7 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
                 layer.self_attn.self_attn_mask.copy_(cuda_graph_mask)
 
 
-            output = self._step(cuda_graph_mask, valid_seq_pos, compiled_text_decoder[0] if self.step_nr==self.min_prompt_len else compiled_text_decoder[1], model, first=self.step_nr == self.min_prompt_len)
+            output = self._step(cuda_graph_mask, valid_seq_pos, compiled_text_decoder[0] if self.step_nr==self.min_prompt_len else compiled_text_decoder[1], model, first=self.step_nr == self.min_prompt_len, profile=profile)
             prev_pos = self.step_nr
             if not output:
                 break
@@ -664,10 +665,10 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
             for hook in self.step_hooks.values():
                 hook(self.prompt_indices, seqs, step_scores, prefill=True)
     
-    def _step(self, cuda_graph_mask, valid_seq_pos, cuda_graph, model, first=False) -> bool:
+    def _step(self, cuda_graph_mask, valid_seq_pos, cuda_graph, model, first=False, profile: bool = False) -> bool:
         # Generate the next step output.
         # model_output = self._decode(self.seqs[:, self.step_nr - 1 : self.step_nr] if not first else self.seqs[:, self.step_nr - 1 : self.step_nr].repeat(5,1), cuda_graph_mask, valid_seq_pos, cuda_graph, model)
-        model_output = self._decode(self.seqs[:, self.step_nr - 1 : self.step_nr], cuda_graph_mask, valid_seq_pos, cuda_graph, model)
+        model_output = self._decode(self.seqs[:, self.step_nr - 1 : self.step_nr], cuda_graph_mask, valid_seq_pos, cuda_graph, model, profile=profile)
 
         self.state_bag.increment_step_nr()
 
@@ -1042,7 +1043,7 @@ class _BeamSearchSeq2SeqGeneratorOp(_BeamSearchSequenceGeneratorOpBase):
         self.cache_batch = cache_batch
 
     @override
-    def _decode(self, seqs: Tensor, cuda_graph_mask: Tensor, valid_seq_pos: Tensor, cuda_graph = None, model = None) -> SequenceModelOutput:
+    def _decode(self, seqs: Tensor, cuda_graph_mask: Tensor, valid_seq_pos: Tensor, cuda_graph = None, model = None, profile: bool = False) -> SequenceModelOutput:
         decoder_output, decoder_padding_mask = model.decode(
             seqs,
             None,  # We never use PAD in incremental decoding.
@@ -1052,6 +1053,7 @@ class _BeamSearchSeq2SeqGeneratorOp(_BeamSearchSequenceGeneratorOpBase):
             cuda_graph_mask=cuda_graph_mask,
             valid_seq_pos=valid_seq_pos,
             compiled_decoder=cuda_graph,
+            profile=profile
         )
 
         return model.project(decoder_output, decoder_padding_mask)
