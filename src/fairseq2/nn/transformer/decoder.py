@@ -233,7 +233,9 @@ class StandardTransformerDecoder(TransformerDecoder):
         #         seqs, keys=seqs, training=self.training, state_bag=state_bag
         #     )
 
+
         for layer_idx, layer in enumerate(self.layers.drop_iter()):
+
             seqs, padding_mask = layer(
                 seqs,
                 padding_mask,
@@ -245,7 +247,8 @@ class StandardTransformerDecoder(TransformerDecoder):
                 valid_seq_pos=valid_seq_pos,
                 beam_size=beam_size
             )
-            
+            # return seqs, padding_mask
+
             for hook in self._layer_output_hooks.values():
                 if not hook(layer_idx, seqs, padding_mask, num_layers):
                     break
@@ -276,30 +279,25 @@ class StandardTransformerDecoder(TransformerDecoder):
 
         num_layers = len(self.layers)
 
-        # if self.self_attn_mask_factory is None:
-        #     self_attn_mask = None
-        # else:
-        #     self_attn_mask = self.self_attn_mask_factory(
-        #         seqs, keys=seqs, training=self.training, state_bag=state_bag
-        #     )
+        if self.self_attn_mask_factory is None:
+            self_attn_mask = None
+        else:
+            self_attn_mask = self.self_attn_mask_factory(
+                seqs, keys=seqs, training=self.training, state_bag=state_bag
+            )
 
         for layer_idx, layer in enumerate(self.layers.drop_iter()):
-            if profile and layer_idx == 5:
-                torch.cuda.nvtx.range_push("hello")
-
             seqs, padding_mask = layer.forward2(
                 seqs,
                 padding_mask,
-                # self_attn_mask,
-                cuda_graph_mask,
+                self_attn_mask,
+                # cuda_graph_mask,
                 encoder_output,
                 encoder_padding_mask,
                 state_bag=state_bag,
                 valid_seq_pos=valid_seq_pos,
                 beam_size=beam_size
             )
-            if profile and layer_idx == 5:
-                torch.cuda.nvtx.range_pop()
 
             for hook in self._layer_output_hooks.values():
                 if not hook(layer_idx, seqs, padding_mask, num_layers):

@@ -598,8 +598,7 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
             for layer in model.decoder.layers.drop_iter():
                 layer.self_attn.self_attn_mask.copy_(cuda_graph_mask)
 
-
-            output = self._step(cuda_graph_mask, valid_seq_pos, compiled_text_decoder[0] if self.step_nr==self.min_prompt_len else compiled_text_decoder[1], model, first=self.step_nr == self.min_prompt_len, profile=profile)
+            output = self._step(cuda_graph_mask, valid_seq_pos, compiled_text_decoder[0] if self.step_nr==self.min_prompt_len else compiled_text_decoder[1], model, first=self.step_nr == self.min_prompt_len, profile=profile and self.step_nr==self.min_prompt_len)
             prev_pos = self.step_nr
             if not output:
                 break
@@ -668,7 +667,7 @@ class _BeamSearchSequenceGeneratorOpBase(ABC):
     def _step(self, cuda_graph_mask, valid_seq_pos, cuda_graph, model, first=False, profile: bool = False) -> bool:
         # Generate the next step output.
         # model_output = self._decode(self.seqs[:, self.step_nr - 1 : self.step_nr] if not first else self.seqs[:, self.step_nr - 1 : self.step_nr].repeat(5,1), cuda_graph_mask, valid_seq_pos, cuda_graph, model)
-        model_output = self._decode(self.seqs[:, self.step_nr - 1 : self.step_nr], cuda_graph_mask, valid_seq_pos, cuda_graph, model, profile=profile)
+        model_output = self._decode(self.seqs[:, self.step_nr - 1 : self.step_nr], cuda_graph_mask, valid_seq_pos, cuda_graph, model, profile=profile and True)
 
         self.state_bag.increment_step_nr()
 
