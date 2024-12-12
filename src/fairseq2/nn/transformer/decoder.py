@@ -231,8 +231,6 @@ class StandardTransformerDecoder(TransformerDecoder):
             )
 
         for layer_idx, layer in enumerate(self.layers.drop_iter()):
-            if profile and layer_idx == 5:
-                torch.cuda.nvtx.range_push("hello")
             seqs, padding_mask = layer(
                 seqs,
                 padding_mask,
@@ -241,8 +239,6 @@ class StandardTransformerDecoder(TransformerDecoder):
                 encoder_padding_mask,
                 state_bag=state_bag,
             )
-            if profile and layer_idx == 5:
-                torch.cuda.nvtx.range_pop()
             
             for hook in self._layer_output_hooks.values():
                 if not hook(layer_idx, seqs, padding_mask, num_layers):
